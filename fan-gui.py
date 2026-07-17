@@ -255,6 +255,8 @@ input[type=range]:disabled{opacity:.5}
 <button data-v="100" title="Max duty (clamped to the cap).">Max</button>
 </div>
 <div class="btn-row">
+<button class="btn" id="manual" title="Take manual control without changing the slider value. The poller will hold the current duty and keep the EC from drifting back to its auto-curve.">🎛️ Manual</button>
+<button class="btn" id="hotsilent" title="Lock both fans at the hardware's minimum stable speed. Ignores CPU temperature — even a 90°C CPU stays quiet. The poller fights any drift back to the EC's own auto-curve.">🥵 Hot &amp; Silent</button>
 <button class="btn" id="link" title="When on, dragging fan 1 also moves fan 2 and vice versa. Off = independent control.">🔗 Link fans</button>
 <button class="btn warn" id="restore" title="Hand control back to the EC's own auto-curve. The poller stops writing.">Release control</button>
 </div>
@@ -359,6 +361,28 @@ $('link').addEventListener('click',()=>{
 });
 
 $('restore').addEventListener('click',()=>setMode('released'));
+
+// # ponytail: "Manual" — flip into manual mode without touching the slider
+// value. Useful when you want the poller to hold the current duty instead
+// of letting the curve drive it. Sets the slider positions to whatever the
+// EC currently reports so the UI agrees with hardware.
+$('manual').addEventListener('click', async () => {
+  await setMode('manual');
+  // Slider positions will be re-synced from /snapshot on the next update()
+});
+
+// # ponytail: "Hot & Silent" — force both fans to 25% (the kernel's
+// minimum stable speed = NB02_FAN_SPEED_MAX * FAN_ON_MIN_SPEED_PERCENT / 100
+// = 200 * 25/100 = 50 duty = 25% slider). CPU temperature is ignored.
+// The 50Hz poller holds the value and fights any drift from the EC's
+// own auto-curve.
+$('hotsilent').addEventListener('click', async () => {
+  await setMode('manual');
+  const v = 25;
+  $('f1').value = v; $('v1').textContent = v;
+  $('f2').value = v; $('v2').textContent = v;
+  setFan(1, v);
+});
 
 $('maxduty').addEventListener('change', e=>post('/config',{max_duty:+e.target.value}));
 
