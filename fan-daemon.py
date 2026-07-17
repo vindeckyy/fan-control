@@ -67,6 +67,9 @@ def loop(args):
             if args.fans >= f and abs(rd(cmd) - pwm) >= args.hysteresis:
                 wr(cmd, pwm)
         time.sleep(args.interval)
+    # ponytail: release manual lock + close FD before exiting so the GUI's
+    # writes after `systemctl stop fan-daemon` are uncontested. Without this,
+    # the daemon's last write can race the GUI's first write.
     try: fcntl.ioctl(FD, W_AUTO)
     except Exception: pass
     os.close(FD)

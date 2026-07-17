@@ -57,6 +57,20 @@ def poller():
         poll(); time.sleep(0.1)
 
 subprocess.run(["systemctl", "stop", "fan-daemon"], capture_output=True)
+# # ponytail: systemctl stop returns once the signal is sent, not when the
+# unit is actually inactive. Loop until it really is, otherwise the daemon
+# thread may still be writing while we open FD and start the poller.
+for _ in range(50):
+    r = subprocess.run(["systemctl", "is-active", "fan-daemon"], capture_output=True, text=True)
+    if r.stdout.strip() != "active":
+        break
+    time.sleep(0.05)
+subprocess.run(["systemctl", "reset-failed", "fan-daemon"], capture_output=True)
+# # ponytail: open /dev/tuxedo_io once, hold for the GUI lifetime. Only one writer
+# at a time on this device — kernel doesn't serialize concurrent writers
+# against the EC, so fan-daemon and fan-gui would race the same registers.
+# The poll above blocks until fan-daemon exits and closes its FD,
+# so by the time this line runs, the device is exclusively ours.
 lock_manual()
 threading.Thread(target=poller, daemon=True).start()
 
