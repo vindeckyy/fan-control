@@ -30,7 +30,6 @@ state = {
     'targets': {1: 0, 2: 0},
     'last_duty': {1: 0, 2: 0},
     'auto': False,
-    'interval_ms': 500,
     'max_duty': 200,
 }
 
@@ -66,15 +65,24 @@ def poll():
         return
     for f in (1, 2):
         t = s['targets'][f]
+        # Skip the ioctl round-trip if the EC already reports our target.
+        # # ponytail: read+write on every cycle is one syscall; this saves one.
         if t == 0 and s['last_duty'][f] == 0:
             continue
-        set_fan(f, t)
+        cmd = (R_FS1, W_FS1) if f == 1 else (R_FS2, W_FS2)
+        buf.value = 0
+        fcntl.ioctl(fd, cmd[0], buf, True)
+        if (buf.value & 0xFF) == t:
+            s['last_duty'][f] = t
+            continue
+        buf.value = t
+        fcntl.ioctl(fd, cmd[1], buf, True)
         s['last_duty'][f] = t
 
 def poller():
     while True:
         poll()
-        time.sleep(state['interval_ms'] / 1000)
+        time.sleep(0.05)  # 20Hz — fastest the EC can settle; deeper would be wasted ioctls
 
 subprocess.run(["systemctl", "stop", "tcc-fan"], capture_output=True)
 threading.Thread(target=poller, daemon=True).start()
@@ -129,7 +137,7 @@ input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;bac
 <div class="wrap">
 <div class="card">
 <h1>⚡ Fan Control</h1>
-<div class="sub"><span class="live-dot"></span>Live <span class="tag">re-asserting every <span id="ivTxt">500</span>ms</span></div>
+<div class="sub"><span class="live-dot"></span>Live <span class="tag">read-when-needed</span></div>
 
 <div class="group">
 <div class="row"><label>CPU Fan</label><span><span class="v" id="v1">0</span>% <span class="d" id="a1">(read 0)</span></span></div>
@@ -167,10 +175,6 @@ input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;bac
 
 <div class="card">
 <h2>Settings</h2>
-<div class="setting">
-<label>Re-assert interval (ms)</label>
-<input type="number" id="interval" min="100" max="5000" step="100" value="500">
-</div>
 <div class="setting">
 <label>Max duty cap</label>
 <input type="number" id="maxduty" min="100" max="255" step="1" value="200">
@@ -226,9 +230,8 @@ function setFan(f,v){fetch('/set',{method:'POST',headers:{'Content-Type':'applic
 
 $('apply').addEventListener('click',()=>{
 fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-interval:+$('interval').value,
 max_duty:+$('maxduty').value
-})}).then(()=>{$('ivTxt').textContent=$('interval').value})});
+})})});
 
 $('restore').addEventListener('click',()=>{
 fetch('/restore',{method:'POST'}).then(()=>{$('f1').value=0;$('f2').value=0;$('v1').textContent=0;$('v2').textContent=0;$('auto').checked=false})});
@@ -271,9 +274,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 set_fan(f, p)
                 state['last_duty'][f] = p
         elif self.path == '/config':
-            if 'interval' in body:
-                iv = max(100, min(5000, int(body['interval'])))
-                state['interval_ms'] = iv
             if 'max_duty' in body:
                 state['max_duty'] = max(100, min(255, int(body['max_duty'])))
         elif self.path == '/restore':
