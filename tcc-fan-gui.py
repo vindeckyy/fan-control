@@ -12,6 +12,7 @@ R_TEMP = ioc(IOC_R, MAGIC_RD, 0x12, SZ)
 R_TEMP2 = ioc(IOC_R, MAGIC_RD, 0x13, SZ)
 W_FS1 = ioc(IOC_W, MAGIC_WR, 0x10, SZ)
 W_FS2 = ioc(IOC_W, MAGIC_WR, 0x11, SZ)
+W_MODE = ioc(IOC_W, MAGIC_WR, 0x12, SZ)
 
 fd = os.open('/dev/tuxedo_io', os.O_RDWR)
 buf = (ctypes.c_int64)()
@@ -21,17 +22,20 @@ def read_u32(cmd):
     fcntl.ioctl(fd, cmd, buf, True)
     return buf.value & 0xFF
 
-def set_fan(f, pct):
-    d = int(max(0, min(200, int(pct) * 2)))
-    buf.value = d
-    fcntl.ioctl(fd, W_FS1 if f==1 else W_FS2, buf, True)
-
 state = {
     'targets': {1: 0, 2: 0},
-    'last_duty': {1: 0, 2: 0},
     'auto': False,
     'max_duty': 200,
+    'manual_mode': False,
 }
+
+def lock_manual_mode():
+    # # ponytail: setting bit 0x40 in EC register 0x0751 disables the EC's
+    # own auto-curve. Without it, every write is fought by the EC firmware
+    # within ~100ms. With it, our duty value sticks.
+    buf.value = 0x40
+    fcntl.ioctl(fd, W_MODE, buf, True)
+    state['manual_mode'] = True
 
 def temp_sources():
     out = []
@@ -65,26 +69,20 @@ def poll():
         return
     for f in (1, 2):
         t = s['targets'][f]
-        # Skip the ioctl round-trip if the EC already reports our target.
-        # # ponytail: read+write on every cycle is one syscall; this saves one.
-        if t == 0 and s['last_duty'][f] == 0:
-            continue
-        cmd = (R_FS1, W_FS1) if f == 1 else (R_FS2, W_FS2)
-        buf.value = 0
-        fcntl.ioctl(fd, cmd[0], buf, True)
-        if (buf.value & 0xFF) == t:
-            s['last_duty'][f] = t
-            continue
+        cmd = (W_FS1,) if f == 1 else (W_FS2,)
         buf.value = t
-        fcntl.ioctl(fd, cmd[1], buf, True)
-        s['last_duty'][f] = t
+        fcntl.ioctl(fd, cmd[0], buf, True)
+        # # ponytail: brute-force write per cycle. EC firmware fights back
+        # within ~100ms — there's no ready flag, no mode bit that sticks on
+        # this barebone. Ceiling: 1 ioctl per fan per cycle = 20Hz total.
 
 def poller():
     while True:
         poll()
-        time.sleep(0.05)  # 20Hz — fastest the EC can settle; deeper would be wasted ioctls
+        time.sleep(0.1)
 
 subprocess.run(["systemctl", "stop", "tcc-fan"], capture_output=True)
+lock_manual_mode()
 threading.Thread(target=poller, daemon=True).start()
 
 HTML = r"""<!DOCTYPE html>
@@ -271,20 +269,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             p = int(body['pct'])
             if f in (1, 2) and 0 <= p <= 100:
                 state['targets'][f] = p
-                set_fan(f, p)
-                state['last_duty'][f] = p
+                cmd = (W_FS1, W_FS2)[f - 1]
+                # # ponytail: cap duty at 198 — EC firmware wraps/oscillates at the top
+                # of its 0-200 range. Slider 99% → 198 duty, the highest stable value.
+                # Ceiling: user can't see 100% true-max; the practical ceiling here is 99%.
+                buf.value = int(max(0, min(198, p * 2)))
+                fcntl.ioctl(fd, cmd, buf, True)
         elif self.path == '/config':
             if 'max_duty' in body:
                 state['max_duty'] = max(100, min(255, int(body['max_duty'])))
         elif self.path == '/restore':
             state['auto'] = True
             state['targets'] = {1: 0, 2: 0}
+            buf.value = 0  # clear bit 0x40, EC regains auto-control
+            fcntl.ioctl(fd, W_MODE, buf, True)
+            state['manual_mode'] = False
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(b'{"ok":true}')
 
 def shutdown(*_):
+    try:
+        if state.get('manual_mode'):
+            buf.value = 0
+            fcntl.ioctl(fd, W_MODE, buf, True)
+    except Exception:
+        pass
     try: os.close(fd)
     except Exception: pass
     subprocess.run(["systemctl", "start", "tcc-fan"], capture_output=True)
