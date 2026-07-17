@@ -498,14 +498,11 @@ function update(){
     $('ec2').textContent=fmt(s.ec_temp2);
     state.mode = s.mode;
     state.profile = s.profile;
-    state.targets = s.targets;
-    // Update slider positions to reflect the live duty in curve mode
-    if (s.mode === 'curve' || s.mode === 'custom' || s.mode === 'manual') {
-      const p1 = pct(s.fan1);
-      const p2 = pct(s.fan2);
-      $('f1').value = p1; $('v1').textContent = p1;
-      $('f2').value = p2; $('v2').textContent = p2;
-    }
+    // # ponytail: do NOT sync slider position to live EC duty. The slider is
+    // what the user set; the poller's job is to keep the hardware there. We
+    // update the readback text + bar (what's actually happening), not the
+    // slider thumb (what was requested). This way the UI shows the setpoint
+    // while the bar/readback show the real fan response.
     refreshUI();
     const cpu = s.temps.find(t => t.name === 'k10temp');
     if (cpu) $('cpuPct').textContent = `${fmt(cpu.temp)}°${fahrenheit?'F':'C'}`;
