@@ -231,6 +231,8 @@ input[type=range]:disabled{opacity:.5}
 <button class="btn active" data-profile="balanced" title="Default. Balanced between noise and cooling. Reasonable fan noise for typical workloads.">⚖️ Balanced</button>
 <button class="btn" data-profile="performance" title="Keeps fans at higher duty. Better for sustained heavy loads, gaming, video encoding.">🚀 Performance</button>
 <button class="btn" data-profile="custom" title="Edit your own curve. Click to enter edit mode.">🛠 Custom</button>
+<button class="btn" data-profile="manual" title="Manual mode. The curve stops driving. The poller holds whatever duty is set by the slider/presets/Hot & Silent. Pick a profile to go back to curve mode.">🎛️ Manual</button>
+</div>
 </div>
 <div class="suggest" id="curveHint">CPU temp drives the fan. Sliders are disabled in curve mode — pick a preset or switch to manual.</div>
 </div>
@@ -255,7 +257,6 @@ input[type=range]:disabled{opacity:.5}
 <button data-v="100" title="Max duty (clamped to the cap).">Max</button>
 </div>
 <div class="btn-row">
-<button class="btn" id="manual" title="Take manual control without changing the slider value. The poller will hold the current duty and keep the EC from drifting back to its auto-curve.">🎛️ Manual</button>
 <button class="btn" id="hotsilent" title="Lock both fans at the hardware's minimum stable speed. Ignores CPU temperature — even a 90°C CPU stays quiet. The poller fights any drift back to the EC's own auto-curve.">🥵 Hot &amp; Silent</button>
 <button class="btn" id="link" title="When on, dragging fan 1 also moves fan 2 and vice versa. Off = independent control.">🔗 Link fans</button>
 <button class="btn warn" id="restore" title="Hand control back to the EC's own auto-curve. The poller stops writing.">Release control</button>
@@ -338,7 +339,16 @@ async function setMode(m){
 }
 
 document.querySelectorAll('#profiles button').forEach(b=>{
-  b.addEventListener('click',()=>switchProfile(b.dataset.profile));
+  b.addEventListener('click', async () => {
+    const p = b.dataset.profile;
+    if (p === 'manual') {
+      // # ponytail: Manual is a mode toggle, not a profile change. The
+      // last-selected curve profile stays in state so resuming is one click.
+      await setMode('manual');
+    } else {
+      await switchProfile(p);
+    }
+  });
 });
 
 document.querySelectorAll('#presets button').forEach(b=>{
@@ -361,15 +371,6 @@ $('link').addEventListener('click',()=>{
 });
 
 $('restore').addEventListener('click',()=>setMode('released'));
-
-// # ponytail: "Manual" — flip into manual mode without touching the slider
-// value. Useful when you want the poller to hold the current duty instead
-// of letting the curve drive it. Sets the slider positions to whatever the
-// EC currently reports so the UI agrees with hardware.
-$('manual').addEventListener('click', async () => {
-  await setMode('manual');
-  // Slider positions will be re-synced from /snapshot on the next update()
-});
 
 // # ponytail: "Hot & Silent" — force both fans to 25% (the kernel's
 // minimum stable speed = NB02_FAN_SPEED_MAX * FAN_ON_MIN_SPEED_PERCENT / 100
@@ -454,7 +455,12 @@ $('applyCurve').addEventListener('click',()=>{
 
 function refreshUI(){
   document.querySelectorAll('#profiles button').forEach(b=>{
-    b.classList.toggle('active', b.dataset.profile === state.profile);
+    // # ponytail: 'manual' is a mode, not a profile — highlight it when
+    // mode === 'manual' instead of when it matches state.profile.
+    const isActive = b.dataset.profile === 'manual'
+      ? state.mode === 'manual'
+      : b.dataset.profile === state.profile;
+    b.classList.toggle('active', isActive);
   });
   const inCurve = state.mode === 'curve' || state.mode === 'custom';
   const inManual = state.mode === 'manual';
