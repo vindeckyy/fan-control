@@ -22,9 +22,9 @@ small, dependency-free, and bound to localhost.
 
 ## Dashboard
 
-![Live fan controls, CPU and GPU telemetry, and temperature history](docs/images/dashboard-controls.png)
+![Live fan controls, CPU and GPU telemetry, and temperature history](docs/images/dashboard-controls.jpg)
 
-![Custom fan curve editor and thermal safety settings](docs/images/dashboard-curve.png)
+![Custom fan curve editor and thermal safety settings](docs/images/dashboard-curve.jpg)
 
 ## Features
 
