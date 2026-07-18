@@ -20,6 +20,12 @@ Fan Control provides automatic temperature curves, direct manual control,
 live CPU/GPU telemetry, and a responsive local dashboard. It is deliberately
 small, dependency-free, and bound to localhost.
 
+## Dashboard
+
+![Live fan controls, CPU and GPU telemetry, and temperature history](docs/images/dashboard-controls.png)
+
+![Custom fan curve editor and thermal safety settings](docs/images/dashboard-curve.png)
+
 ## Features
 
 - Silent, Balanced, Performance, custom-curve, manual, and firmware-auto modes
