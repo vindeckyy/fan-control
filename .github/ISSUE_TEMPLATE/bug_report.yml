@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem with Fan Control
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. This is an unofficial community project.
+        For security vulnerabilities, use private vulnerability reporting instead.
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model
+      description: Manufacturer and exact Clevo/Tongfang model or barebone identifier.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Linux distribution, kernel version, and Python version.
+      placeholder: Ubuntu 24.04, Linux 6.11, Python 3.12
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Control mode
+      options:
+        - Manual
+        - Silent
+        - Balanced
+        - Performance
+        - Custom curve
+        - EC Auto
+        - Demo
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected behavior and exact reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove serial numbers and personal information before pasting logs.
+      render: shell
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this on the latest `main` branch.
+          required: true
+        - label: I understand this project is unofficial and not manufacturer-supported.
+          required: true
