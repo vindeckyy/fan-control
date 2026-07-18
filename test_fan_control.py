@@ -38,6 +38,8 @@ class FanLogicTests(unittest.TestCase):
     def test_dashboard_contract(self):
         self.assertIn('id="chart"', gui.HTML)
         self.assertIn('id="curveRows"', gui.HTML)
+        self.assertIn("$('chart').toggleAttribute('hidden',!visible)", gui.HTML)
+        self.assertNotIn("$('chart').hidden=false", gui.HTML)
         self.assertEqual(gui.HTML.count('id="fan1"'), 1)
         self.assertEqual(gui.HTML.count('id="fan2"'), 1)
 
