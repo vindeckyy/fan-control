@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 
@@ -87,6 +88,33 @@ def cpu_temp(sensor):
         return None
 
 
+def parse_nvidia_temperatures(output):
+    temperatures = []
+    for line in output.splitlines():
+        try:
+            temperature = float(line.strip())
+        except ValueError:
+            continue
+        if 0 < temperature <= 150:
+            temperatures.append(temperature)
+    return temperatures
+
+
+def gpu_temp():
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    temperatures = parse_nvidia_temperatures(result.stdout) if result.returncode == 0 else []
+    return max(temperatures) if temperatures else None
+
+
 def normalize_curve(curve):
     """Validate, sort, deduplicate, and clamp a user-provided curve."""
     if not isinstance(curve, list):
@@ -164,13 +192,14 @@ def run(args):
     released_for_fault = False
     try:
         while not stopped:
-            temp = cpu_temp(sensor)
-            if temp is None and ec:
+            cpu = cpu_temp(sensor)
+            if cpu is None and ec:
                 try:
-                    temp = float(ec.read(R_TEMP))
+                    cpu = float(ec.read(R_TEMP))
                 except OSError:
-                    temp = None
-            if temp is None or not 0 < temp <= 150:
+                    cpu = None
+            temperatures = [value for value in (cpu, gpu_temp()) if value is not None and 0 < value <= 150]
+            if not temperatures:
                 missing += 1
                 if ec and missing >= 3 and not released_for_fault:
                     print("temperature unavailable; returning control to the EC", file=sys.stderr)
@@ -179,6 +208,7 @@ def run(args):
                 time.sleep(args.interval)
                 continue
 
+            temp = max(temperatures)
             if released_for_fault and ec:
                 ec.lock()
                 released_for_fault = False

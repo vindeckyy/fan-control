@@ -45,6 +45,11 @@ class FanLogicTests(unittest.TestCase):
         sensors = gui.parse_nvidia_smi("0, 67, NVIDIA GeForce RTX 4080\n1, 54, NVIDIA RTX A2000\n")
         self.assertEqual([sensor["temp"] for sensor in sensors], [67.0, 54.0])
         self.assertIn("RTX 4080", sensors[0]["label"])
+        self.assertEqual(daemon.parse_nvidia_temperatures("67\n54\nN/A\n"), [67.0, 54.0])
+
+    def test_control_uses_hottest_cpu_or_gpu_sensor(self):
+        with mock.patch.object(gui, "primary_temp", return_value=61.0), mock.patch.object(gui, "gpu_temp", return_value=78.0):
+            self.assertEqual(gui.control_temp(), 78.0)
 
     def test_device_path_override(self):
         with mock.patch.dict(os.environ, {"FAN_CONTROL_DEVICE": "/dev/custom_fan_io"}):

@@ -267,6 +267,11 @@ def gpu_temp():
     return max(values) if values else None
 
 
+def control_temp():
+    values = [value for value in (primary_temp(), gpu_temp()) if value is not None and 0 < value <= 150]
+    return max(values) if values else None
+
+
 def control_loop():
     global _last_curve_duty
     missing_temperature = 0
@@ -281,7 +286,7 @@ def control_loop():
             critical = state["critical_temp"]
             curve = list(state["custom_curve"] if profile == "custom" else PROFILES[profile])
             current = (_readback["fan1"], _readback["fan2"])
-        temp = primary_temp()
+        temp = control_temp()
         if mode == "released":
             missing_temperature = 0
             released_for_fault = False
@@ -341,6 +346,7 @@ def snapshot():
             "max_duty": state["max_duty"], "hysteresis": state["hysteresis"],
             "critical_temp": state["critical_temp"], "custom_curve": list(state["custom_curve"]),
             "temps": list(_sensor_cache), "primary_temp": primary_temp(), "gpu_temp": gpu_temp(),
+            "control_temp": control_temp(),
         })
     return result
 
@@ -369,7 +375,7 @@ details{border-top:1px solid var(--line);padding:14px 0}details:first-of-type{bo
 </style></head><body><main class="shell">
 <header><div class="brand"><div class="logo" aria-hidden="true">◉</div><div><h1>Fan Control</h1><p>Local thermal control center</p></div></div><div class="status"><i class="dot" id="dot"></i><span id="connection">Connecting…</span><button class="iconBtn" id="theme" aria-label="Toggle theme">☼</button></div></header>
 <div class="grid">
-<section class="panel"><div class="hero"><div><div class="eyebrow">CPU temperature</div><div class="tempNow"><span id="primaryTemp">--</span><small>°C</small></div></div><div class="pill">Mode&nbsp; <b id="modeName">Manual</b></div></div>
+<section class="panel"><div class="hero"><div><div class="eyebrow">Control temperature</div><div class="tempNow"><span id="primaryTemp">--</span><small>°C</small></div></div><div class="pill">Mode&nbsp; <b id="modeName">Manual</b></div></div>
 <div class="modebar" id="modes"><button data-mode="manual">Manual</button><button data-profile="silent">Silent</button><button data-profile="balanced">Balanced</button><button data-profile="performance">Performance</button><button data-mode="released">EC Auto</button></div>
 <div class="fan"><div class="fanHead"><div><div class="fanName">CPU fan</div><div class="fanMeta" id="fan1Raw">Raw duty --</div></div><div class="fanValue"><span id="fan1Value">0</span>% <small>set</small></div></div><input type="range" id="fan1" min="0" max="100" value="0" aria-label="CPU fan speed"></div>
 <div class="fan"><div class="fanHead"><div><div class="fanName">GPU fan</div><div class="fanMeta" id="fan2Raw">Raw duty --</div></div><div class="fanValue"><span id="fan2Value">0</span>% <small>set</small></div></div><input type="range" id="fan2" min="0" max="100" value="0" aria-label="GPU fan speed"></div>
@@ -402,7 +408,7 @@ $('curveRows').addEventListener('click',event=>{if(event.target.dataset.remove!=
 $('addPoint').addEventListener('click',()=>{const rows=[...document.querySelectorAll('.curveRow')],last=rows.at(-1),curve=rows.map(r=>[+r.querySelector('.curveTemp').value,+r.querySelector('.curveDuty').value]);curve.push(last?[Math.min(150,curve.at(-1)[0]+5),Math.min(198,curve.at(-1)[1]+10)]:[60,50]);renderCurve(curve)});
 $('applyCurve').addEventListener('click',()=>{const curve=[...document.querySelectorAll('.curveRow')].map(r=>[+r.querySelector('.curveTemp').value,+r.querySelector('.curveDuty').value]);post('/custom',{curve}).then(()=>{toast('Custom curve active');update()}).catch(e=>toast(e.message))});
 function chart(history){if(history.length<2)return;const start=history[0].time,end=history.at(-1).time||start+1,x=p=>1000*(p.time-start)/(end-start||1),tempY=value=>(150-Math.min(110,value)*1.35).toFixed(1),tempPoints=history.filter(p=>p.temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.temp)}`).join(' '),gpuPoints=history.filter(p=>p.gpu_temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.gpu_temp)}`).join(' '),fanPoints=history.map(p=>`${x(p).toFixed(1)},${(150-Math.min(198,p.fan1)*.72).toFixed(1)}`).join(' ');$('tempLine').setAttribute('points',tempPoints);$('gpuLine').setAttribute('points',gpuPoints);$('fanLine').setAttribute('points',fanPoints);$('chart').hidden=false;$('chartEmpty').hidden=true}
-function render(s){ui.state=s;const temp=s.primary_temp;$('primaryTemp').textContent=temp==null?'--':temp.toFixed(1);$('modeName').textContent=s.mode==='released'?'EC Auto':s.mode==='curve'?s.profile[0].toUpperCase()+s.profile.slice(1):'Manual';$('connection').textContent=Date.now()/1000-s.updated<3?'Live':'Readback delayed';$('dot').style.background=Date.now()/1000-s.updated<3?'var(--cyan)':'var(--amber)';const manual=s.mode==='manual';for(const fan of [1,2]){const duty=s['fan'+fan];$(`fan${fan}Raw`).textContent=`Raw duty ${duty} · actual ${dutyPct(duty,s.max_duty)}%`;$(`fan${fan}`).disabled=!manual;if(document.activeElement!==$(`fan${fan}`))setRange(`fan${fan}`,s.targets[fan])}$('presets').querySelectorAll('button').forEach(b=>b.disabled=!manual);document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('active',b.dataset.mode===s.mode||s.mode==='curve'&&b.dataset.profile===s.profile));$('maxDuty').value=s.max_duty;$('hysteresis').value=s.hysteresis;$('criticalTemp').value=s.critical_temp;if(!$('curveRows').children.length)renderCurve(s.custom_curve);$('sensorCount').textContent=`${s.temps.length} detected`;$('sensors').innerHTML=s.temps.length?s.temps.map(t=>`<div class="sensor"><span>${esc(t.name)} · ${esc(t.label)}</span><b>${t.temp.toFixed(1)}°C</b></div>`).join(''):'<div class="empty">No hwmon sensors found</div>';if(temp>=s.critical_temp&&!ui.notified&&Notification.permission==='granted'){new Notification('Fan Control',{body:`Critical CPU temperature: ${temp.toFixed(1)}°C. Maximum cooling engaged.`});ui.notified=true}if(temp<s.critical_temp-5)ui.notified=false}
+function render(s){ui.state=s;const temp=s.control_temp;$('primaryTemp').textContent=temp==null?'--':temp.toFixed(1);$('modeName').textContent=s.mode==='released'?'EC Auto':s.mode==='curve'?s.profile[0].toUpperCase()+s.profile.slice(1):'Manual';$('connection').textContent=Date.now()/1000-s.updated<3?'Live':'Readback delayed';$('dot').style.background=Date.now()/1000-s.updated<3?'var(--cyan)':'var(--amber)';const manual=s.mode==='manual';for(const fan of [1,2]){const duty=s['fan'+fan];$(`fan${fan}Raw`).textContent=`Raw duty ${duty} · actual ${dutyPct(duty,s.max_duty)}%`;$(`fan${fan}`).disabled=!manual;if(document.activeElement!==$(`fan${fan}`))setRange(`fan${fan}`,s.targets[fan])}$('presets').querySelectorAll('button').forEach(b=>b.disabled=!manual);document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('active',b.dataset.mode===s.mode||s.mode==='curve'&&b.dataset.profile===s.profile));$('maxDuty').value=s.max_duty;$('hysteresis').value=s.hysteresis;$('criticalTemp').value=s.critical_temp;if(!$('curveRows').children.length)renderCurve(s.custom_curve);$('sensorCount').textContent=`${s.temps.length} detected`;$('sensors').innerHTML=s.temps.length?s.temps.map(t=>`<div class="sensor"><span>${esc(t.name)} · ${esc(t.label)}</span><b>${t.temp.toFixed(1)}°C</b></div>`).join(''):'<div class="empty">No hwmon sensors found</div>';if(temp>=s.critical_temp&&!ui.notified&&Notification.permission==='granted'){new Notification('Fan Control',{body:`Critical control temperature: ${temp.toFixed(1)}°C. Maximum cooling engaged.`});ui.notified=true}if(temp<s.critical_temp-5)ui.notified=false}
 async function update(){try{render(await api('/snapshot'));const h=await api('/history');chart(h.history)}catch(e){$('connection').textContent='Disconnected';$('dot').style.background='var(--red)'}}
 $('notifications').addEventListener('click',async()=>{if(!('Notification'in window))return toast('Notifications are not supported');const permission=await Notification.requestPermission();toast(permission==='granted'?'Temperature alerts enabled':'Notifications not enabled')});
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('fan-theme',theme);$('theme').textContent=theme==='dark'?'☼':'☾'}applyTheme(localStorage.getItem('fan-theme')||'dark');$('theme').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
