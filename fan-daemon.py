@@ -69,6 +69,31 @@ def find_cpu_sensor():
     return None
 
 
+def diagnose(config_path):
+    """Print system state for troubleshooting; does not open the device."""
+    mods = {}
+    try:
+        out = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=5).stdout
+        for mod in ("tuxedo_io", "clevo_wmi", "uniwill_wmi", "tuxedo_keyboard", "clevo_acpi"):
+            mods[mod] = mod in out
+    except Exception as exc:
+        mods["_error"] = str(exc)
+    devs = sorted(pathlib.Path("/dev").glob("*_io"))
+    cfg = pathlib.Path(config_path)
+    print(f"config    {config_path}  {'exists' if cfg.exists() else 'no file'}")
+    for mod, loaded in mods.items():
+        print(f"  module  {mod}:  {'loaded' if loaded else '—'}")
+    print(f"  device  /dev/*_io:  {devs or 'none'}")
+    print(f"  sensor  k10temp:   {find_cpu_sensor() or 'not found'}")
+    nvidia_ok = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5).returncode == 0
+    print(f"  nvidia  nvidia-smi: {'available' if nvidia_ok else 'no'}")
+    if not devs and mods.get("tuxedo_io") != True:
+        print("  >>> tuxedo-io module not loaded. Install tuxedo-drivers and reboot.")
+    elif not devs and mods.get("tuxedo_io") == True:
+        print("  >>> tuxedo-io is loaded but no /dev/*_io found. Kernel may need updating.")
+    return
+
+
 def find_ec_device():
     configured = os.environ.get("FAN_CONTROL_DEVICE")
     if configured:
@@ -77,8 +102,17 @@ def find_ec_device():
     if len(candidates) == 1:
         return str(candidates[0])
     if not candidates:
-        raise FileNotFoundError("Clevo/Tongfang fan-control device not found")
-    raise FileNotFoundError("multiple fan-control devices found; set FAN_CONTROL_DEVICE")
+        raise FileNotFoundError(
+            "Clevo/Tongfang fan-control device not found. "
+            "The tuxedo-io kernel module must be loaded.\n"
+            "  Fedora:  dnf copr enable kallepm/tuxedo-drivers && dnf install tuxedo-drivers\n"
+            "  Ubuntu:  apt install tuxedo-drivers-dkms\n"
+            "  Arch:    yay -S tuxedo-drivers-dkms  (or clevo-drivers-dkms-git)\n"
+            "  Generic: modprobe tuxedo-io  (if module exists)\n"
+            "Run with --diagnose for a full system check."
+        )
+    names = "; ".join(str(c) for c in candidates)
+    raise FileNotFoundError(f"multiple fan-control devices found; set FAN_CONTROL_DEVICE or FAN_CONTROL_DEVICE={names}")
 
 
 def cpu_temp(sensor):
@@ -242,7 +276,11 @@ def main():
     parser.add_argument("--max-duty", type=int, default=SAFE_MAX_DUTY)
     parser.add_argument("--critical-temp", type=float, default=95)
     parser.add_argument("--dry-run", action="store_true", help="print decisions without opening the EC device")
+    parser.add_argument("--diagnose", action="store_true", help="print system state and exit (no EC access)")
     args = parser.parse_args()
+    if args.diagnose:
+        diagnose(args.config)
+        return
     if args.interval <= 0 or args.hysteresis < 0 or not 70 <= args.critical_temp <= 110:
         parser.error("interval must be positive, hysteresis non-negative, and critical temperature 70-110")
     try:
