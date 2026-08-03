@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import webbrowser
+from bisect import bisect_left
 
 MAGIC_RD, MAGIC_WR = 0xEF, 0xF0
 IOC_R, IOC_W, SZ = 2, 1, 8
@@ -59,9 +60,12 @@ FD = None
 EC_LOCK = threading.RLock()
 STATE_LOCK = threading.RLock()
 STOP = threading.Event()
-HISTORY = collections.deque(maxlen=900)  # 30 minutes at a 2s cadence
+HISTORY = collections.deque(maxlen=900)
 DEMO = False
 _demo = {"fan1": 0, "fan2": 0}
+_sensor_cache = []
+_readback = {"fan1": 0, "fan2": 0, "ec_temp1": 0, "ec_temp2": 0, "updated": 0}
+_last_curve_duty = None
 
 
 def rd(command):
@@ -122,14 +126,17 @@ def normalize_curve(curve):
 
 
 def interpolate(temp, curve):
+    """Binary search interpolation for sorted temperature curves."""
     if temp <= curve[0][0]:
         return curve[0][1]
     if temp >= curve[-1][0]:
         return curve[-1][1]
-    for (t0, d0), (t1, d1) in zip(curve, curve[1:]):
-        if t0 <= temp < t1:
-            return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
-    return curve[-1][1]
+    
+    temps = [p[0] for p in curve]
+    idx = bisect_left(temps, temp) - 1
+    t0, d0 = curve[idx]
+    t1, d1 = curve[idx + 1]
+    return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
 
 
 def load_config():
@@ -174,11 +181,6 @@ def save_config():
         temporary.replace(CONFIG_PATH)
     except OSError as exc:
         print(f"warning: could not save {CONFIG_PATH}: {exc}", file=sys.stderr)
-
-
-_sensor_cache = []
-_readback = {"fan1": 0, "fan2": 0, "ec_temp1": 0, "ec_temp2": 0, "updated": 0}
-_last_curve_duty = None
 
 
 def parse_nvidia_smi(output):

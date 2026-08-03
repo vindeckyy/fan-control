@@ -1,3 +1,1 @@
-__pycache__/
-*.pyc
-.DS_Store
+Nothing should be ignored since only Python source files (.py) were modified and no build artifacts, dependencies, or temporary files are present in the changes.

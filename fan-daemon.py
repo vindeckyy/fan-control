@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import time
+from bisect import bisect_left
 
 MAGIC_RD, MAGIC_WR = 0xEF, 0xF0
 IOC_R, IOC_W, SZ = 2, 1, 8
@@ -35,8 +36,12 @@ PROFILES = {
     "performance": [(0, 0), (50, 0), (60, 80), (70, 140), (80, 180), (85, 198), (110, 198)],
 }
 
+_sensor_cache = None
+
 
 class EC:
+    __slots__ = ("fd",)
+    
     def __init__(self, path):
         self.fd = os.open(path, os.O_RDWR)
 
@@ -60,12 +65,19 @@ class EC:
 
 
 def find_cpu_sensor():
-    for hwmon in sorted(pathlib.Path("/sys/class/hwmon").glob("hwmon*")):
+    global _sensor_cache
+    if _sensor_cache is not None:
+        return _sensor_cache
+    
+    hwmon_path = pathlib.Path("/sys/class/hwmon")
+    for hwmon in sorted(hwmon_path.glob("hwmon*")):
         try:
             if (hwmon / "name").read_text().strip() == "k10temp":
-                return hwmon / "temp1_input"
+                _sensor_cache = hwmon / "temp1_input"
+                return _sensor_cache
         except OSError:
             continue
+    _sensor_cache = None
     return None
 
 
@@ -123,18 +135,28 @@ def cpu_temp(sensor):
 
 
 def parse_nvidia_temperatures(output):
-    temperatures = []
+    """Parse nvidia-smi output into a list of valid temperatures."""
+    temps = []
     for line in output.splitlines():
         try:
-            temperature = float(line.strip())
+            t = float(line.strip())
+            if 0 < t <= 150:
+                temps.append(t)
         except ValueError:
             continue
-        if 0 < temperature <= 150:
-            temperatures.append(temperature)
-    return temperatures
+    return temps
 
+
+_gpu_temp_cache = None
+_gpu_temp_time = 0.0
+_GPU_CACHE_TTL = 1.0
 
 def gpu_temp():
+    global _gpu_temp_cache, _gpu_temp_time
+    now = time.monotonic()
+    if _gpu_temp_cache is not None and now - _gpu_temp_time < _GPU_CACHE_TTL:
+        return _gpu_temp_cache
+    
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
@@ -144,9 +166,14 @@ def gpu_temp():
             check=False,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        _gpu_temp_cache = None
+        _gpu_temp_time = now
         return None
+    
     temperatures = parse_nvidia_temperatures(result.stdout) if result.returncode == 0 else []
-    return max(temperatures) if temperatures else None
+    _gpu_temp_cache = max(temperatures) if temperatures else None
+    _gpu_temp_time = now
+    return _gpu_temp_cache
 
 
 def normalize_curve(curve):
@@ -168,21 +195,25 @@ def normalize_curve(curve):
 
 
 def interpolate(temp, curve):
+    """Binary search interpolation for sorted temperature curves."""
     if temp <= curve[0][0]:
         return curve[0][1]
     if temp >= curve[-1][0]:
         return curve[-1][1]
-    for (t0, d0), (t1, d1) in zip(curve, curve[1:]):
-        if t0 <= temp < t1:
-            return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
-    raise ValueError("invalid fan curve")
+    
+    temps = [p[0] for p in curve]
+    idx = bisect_left(temps, temp) - 1
+    t0, d0 = curve[idx]
+    t1, d1 = curve[idx + 1]
+    return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
 
 
 def target_duty(temp, curve, max_duty=SAFE_MAX_DUTY, critical_temp=95):
     """Critical cooling deliberately bypasses the user noise cap."""
     if temp >= critical_temp:
         return SAFE_MAX_DUTY
-    return max(0, min(max_duty, int(round(interpolate(temp, curve)))))
+    duty = interpolate(temp, curve)
+    return max(0, min(max_duty, int(round(duty))))
 
 
 def load_config(path):
