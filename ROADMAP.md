@@ -7,12 +7,16 @@
 - Validated, sorted, deduplicated custom fan curves
 - Curve hysteresis and a cap-independent critical-temperature override
 - Automatic firmware handoff when temperature data becomes unavailable
-- Serialized ioctl access and clean daemon/dashboard ownership handoff
+- Serialized EC access and clean daemon/dashboard ownership handoff
+- A second `clevo_acpi` sysfs backend for boards where `tuxedo_io` refuses to
+  bind, with the driver's kernel-side watchdog for crash safety. The sysfs
+  interface comes from
+  [clevo-acpi-dkms](https://github.com/arbitrary-string/clevo-acpi-dkms)
+  (GPL-2.0-or-later), verified against the
+  [clevo-control-panel](https://github.com/arbitrary-string/clevo-control-panel)
+  (GPL-3.0) reference daemon.
 - Persistent configuration shared through `/etc/fan-control.json`
 - Live hwmon sensors plus NVIDIA temperature fallback through `nvidia-smi`
-- 30-minute CPU temperature, GPU temperature, and fan-duty history
-- Responsive dark/light dashboard, browser alerts, and demo mode
-- Local-origin API protection, request limits, and security headers
 
 ## Next
 

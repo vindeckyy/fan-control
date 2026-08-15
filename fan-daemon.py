@@ -2,70 +2,36 @@
 """Temperature-driven fan control for Clevo/Tongfang barebones."""
 
 import argparse
-import ctypes
-import fcntl
 import json
-import os
+
 import pathlib
 import signal
 import subprocess
 import sys
 import time
+from fan_backend import (
+    MAX_DUTY_PERCENT,
+    detect_backend,
+    migrate_config,
+)
 
-MAGIC_RD, MAGIC_WR = 0xEF, 0xF0
-IOC_R, IOC_W, SZ = 2, 1, 8
-SAFE_MAX_DUTY = 198
-
-
-def ioc(direction, kind, number, size):
-    return (direction << 30) | (kind << 8) | number | (size << 16)
-
-
-R_FS1 = ioc(IOC_R, MAGIC_RD, 0x10, SZ)
-R_FS2 = ioc(IOC_R, MAGIC_RD, 0x11, SZ)
-R_TEMP = ioc(IOC_R, MAGIC_RD, 0x12, SZ)
-W_FS1 = ioc(IOC_W, MAGIC_WR, 0x10, SZ)
-W_FS2 = ioc(IOC_W, MAGIC_WR, 0x11, SZ)
-W_MODE = ioc(IOC_W, MAGIC_WR, 0x12, SZ)
-W_AUTO = ioc(0, MAGIC_WR, 0x14, 0)
+SAFE_MAX_DUTY = MAX_DUTY_PERCENT
 
 PROFILES = {
-    "silent": [(0, 0), (50, 0), (60, 0), (70, 60), (80, 120), (90, 170), (95, 198), (110, 198)],
-    "balanced": [(0, 0), (50, 0), (60, 50), (70, 100), (80, 150), (90, 180), (95, 198), (110, 198)],
-    "performance": [(0, 0), (50, 0), (60, 80), (70, 140), (80, 180), (85, 198), (110, 198)],
+    "silent": [(0, 0), (50, 0), (60, 0), (70, 30), (80, 61), (90, 86), (95, 100), (110, 100)],
+    "balanced": [(0, 0), (50, 0), (60, 25), (70, 50), (80, 76), (90, 91), (95, 100), (110, 100)],
+    "performance": [(0, 0), (50, 0), (60, 40), (70, 71), (80, 91), (85, 100), (110, 100)],
 }
 
 
-class EC:
-    def __init__(self, path):
-        self.fd = os.open(path, os.O_RDWR)
-
-    def read(self, command):
-        buf = ctypes.c_int64()
-        fcntl.ioctl(self.fd, command, buf, True)
-        return buf.value & 0xFF
-
-    def write(self, command, value):
-        buf = ctypes.c_int64(int(value))
-        fcntl.ioctl(self.fd, command, buf, True)
-
-    def lock(self):
-        self.write(W_MODE, 0x40)
-
-    def release(self):
-        fcntl.ioctl(self.fd, W_AUTO)
-
-    def close(self):
-        os.close(self.fd)
-
-
 def find_cpu_sensor():
-    for hwmon in sorted(pathlib.Path("/sys/class/hwmon").glob("hwmon*")):
-        try:
-            if (hwmon / "name").read_text().strip() == "k10temp":
-                return hwmon / "temp1_input"
-        except OSError:
-            continue
+    for name in ("k10temp", "coretemp"):
+        for hwmon in sorted(pathlib.Path("/sys/class/hwmon").glob("hwmon*")):
+            try:
+                if (hwmon / "name").read_text().strip() == name:
+                    return hwmon / "temp1_input"
+            except OSError:
+                continue
     return None
 
 
@@ -80,39 +46,19 @@ def diagnose(config_path):
         mods["_error"] = str(exc)
     devs = sorted(pathlib.Path("/dev").glob("*_io"))
     cfg = pathlib.Path(config_path)
+    clevo = pathlib.Path("/sys/class/leds/clevo-acpi::kbd_backlight/device")
+    clevo_fans = sorted(clevo.glob("fan*_manual_duty")) if clevo.exists() else []
     print(f"config    {config_path}  {'exists' if cfg.exists() else 'no file'}")
     for mod, loaded in mods.items():
         print(f"  module  {mod}:  {'loaded' if loaded else '—'}")
     print(f"  device  /dev/*_io:  {devs or 'none'}")
-    print(f"  sensor  k10temp:   {find_cpu_sensor() or 'not found'}")
+    print(f"  clevo   fan attrs: {[f.name for f in clevo_fans] or 'none'}")
+    print(f"  sensor  cpu:      {find_cpu_sensor() or 'not found'}")
     nvidia_ok = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5).returncode == 0
     print(f"  nvidia  nvidia-smi: {'available' if nvidia_ok else 'no'}")
-    if not devs and mods.get("tuxedo_io") != True:
-        print("  >>> tuxedo-io module not loaded. Install tuxedo-drivers and reboot.")
-    elif not devs and mods.get("tuxedo_io") == True:
-        print("  >>> tuxedo-io is loaded but no /dev/*_io found. Kernel may need updating.")
+    if not devs and not clevo_fans:
+        print("  >>> no fan-control hardware found. See README 'Compatibility' for setup.")
     return
-
-
-def find_ec_device():
-    configured = os.environ.get("FAN_CONTROL_DEVICE")
-    if configured:
-        return configured
-    candidates = sorted(pathlib.Path("/dev").glob("*_io"))
-    if len(candidates) == 1:
-        return str(candidates[0])
-    if not candidates:
-        raise FileNotFoundError(
-            "Clevo/Tongfang fan-control device not found. "
-            "The tuxedo-io kernel module must be loaded.\n"
-            "  Fedora:  dnf copr enable kallepm/tuxedo-drivers && dnf install tuxedo-drivers\n"
-            "  Ubuntu:  apt install tuxedo-drivers-dkms\n"
-            "  Arch:    yay -S tuxedo-drivers-dkms  (or clevo-drivers-dkms-git)\n"
-            "  Generic: modprobe tuxedo-io  (if module exists)\n"
-            "Run with --diagnose for a full system check."
-        )
-    names = "; ".join(str(c) for c in candidates)
-    raise FileNotFoundError(f"multiple fan-control devices found; set FAN_CONTROL_DEVICE or FAN_CONTROL_DEVICE={names}")
 
 
 def cpu_temp(sensor):
@@ -196,7 +142,7 @@ def load_config(path):
         raise ValueError(f"cannot read config: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("config must contain a JSON object")
-    return value
+    return migrate_config(value)
 
 
 def run(args):
@@ -209,7 +155,7 @@ def run(args):
     hysteresis = max(0, int(config.get("hysteresis", args.hysteresis)))
     critical_temp = max(70, min(110, float(config.get("critical_temp", args.critical_temp))))
     sensor = find_cpu_sensor()
-    ec = None if args.dry_run else EC(args.device or find_ec_device())
+    backend = None if args.dry_run else detect_backend(args.backend, args.device)
     stopped = False
 
     def stop(*_):
@@ -218,50 +164,56 @@ def run(args):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    if ec:
-        ec.lock()
-    print(f"fan daemon: profile={profile}, {len(curve)} points, interval={args.interval}s, cap={max_duty}")
+    if backend:
+        backend.lock()
+    print(f"fan daemon: profile={profile}, backend={backend.name if backend else 'dry-run'}, {len(curve)} points, interval={args.interval}s, cap={max_duty}")
 
     missing = 0
     released_for_fault = False
     try:
         while not stopped:
             cpu = cpu_temp(sensor)
-            if cpu is None and ec:
+            if cpu is None and backend:
                 try:
-                    cpu = float(ec.read(R_TEMP))
+                    cpu = backend.read_temp()
                 except OSError:
                     cpu = None
             temperatures = [value for value in (cpu, gpu_temp()) if value is not None and 0 < value <= 150]
             if not temperatures:
                 missing += 1
-                if ec and missing >= 3 and not released_for_fault:
+                if backend and missing >= 3 and not released_for_fault:
                     print("temperature unavailable; returning control to the EC", file=sys.stderr)
-                    ec.release()
+                    backend.release()
                     released_for_fault = True
                 time.sleep(args.interval)
                 continue
 
             temp = max(temperatures)
-            if released_for_fault and ec:
-                ec.lock()
+            if released_for_fault and backend:
+                backend.lock()
                 released_for_fault = False
             missing = 0
             duty = target_duty(temp, curve, max_duty, critical_temp)
             if args.dry_run:
                 print(f"{temp:.1f}°C -> duty {duty}")
             else:
-                for fan, read_cmd, write_cmd in ((1, R_FS1, W_FS1), (2, R_FS2, W_FS2)):
-                    if fan <= args.fans and (temp >= critical_temp or abs(ec.read(read_cmd) - duty) >= hysteresis):
-                        ec.write(write_cmd, duty)
+                wrote = False
+                for fan in backend.fans():
+                    if fan > args.fans:
+                        break
+                    if temp >= critical_temp or abs(backend.read_duty(fan) - duty) >= hysteresis:
+                        backend.write_duty(fan, duty)
+                        wrote = True
+                if not wrote:
+                    backend.ping()
             time.sleep(args.interval)
     finally:
-        if ec:
+        if backend:
             try:
-                ec.release()
+                backend.release()
             except OSError:
                 pass
-            ec.close()
+            backend.close()
 
 
 def main():
@@ -270,7 +222,8 @@ def main():
     parser.add_argument("--profile", choices=PROFILES, default="balanced")
     parser.add_argument("--curve", type=json.loads, help="JSON list of [temperature, duty] points")
     parser.add_argument("--config", default="/etc/fan-control.json")
-    parser.add_argument("--device", help="kernel device path (or set FAN_CONTROL_DEVICE)")
+    parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
+    parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
     parser.add_argument("--fans", type=int, choices=(1, 2), default=2)
     parser.add_argument("--hysteresis", type=int, default=5)
     parser.add_argument("--max-duty", type=int, default=SAFE_MAX_DUTY)

@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -16,22 +17,23 @@ def load(name, filename):
 
 daemon = load("fan_daemon", "fan-daemon.py")
 gui = load("fan_gui", "fan-gui.py")
+backend = load("fan_backend", "fan_backend.py")
 
 
 class FanLogicTests(unittest.TestCase):
     def test_interpolation_and_bounds(self):
         curve = daemon.normalize_curve([[80, 140], [50, 0], [95, 250]])
-        self.assertEqual(curve, [(50.0, 0), (80.0, 140), (95.0, 198)])
-        self.assertEqual(daemon.target_duty(65, curve), 70)
-        self.assertEqual(daemon.target_duty(200, curve), 198)
+        self.assertEqual(curve, [(50.0, 0), (80.0, 100), (95.0, 100)])
+        self.assertEqual(daemon.target_duty(65, curve), 50)
+        self.assertEqual(daemon.target_duty(200, curve), 100)
 
     def test_critical_cooling_bypasses_noise_cap(self):
         curve = [(0, 0), (110, 100)]
         self.assertLess(daemon.target_duty(50, curve, max_duty=60, critical_temp=95), 60)
-        self.assertEqual(daemon.target_duty(95, curve, max_duty=60, critical_temp=95), 198)
+        self.assertEqual(daemon.target_duty(95, curve, max_duty=60, critical_temp=95), 100)
 
     def test_curve_validation_deduplicates_temperatures(self):
-        self.assertEqual(gui.normalize_curve([[50, 10], [50, 20], [70, 300]]), [(50, 20), (70, 198)])
+        self.assertEqual(gui.normalize_curve([[50, 10], [50, 20], [70, 300]]), [(50, 20), (70, 100)])
         with self.assertRaises(ValueError):
             gui.normalize_curve([[50, 10]])
 
@@ -53,10 +55,78 @@ class FanLogicTests(unittest.TestCase):
         with mock.patch.object(gui, "primary_temp", return_value=61.0), mock.patch.object(gui, "gpu_temp", return_value=78.0):
             self.assertEqual(gui.control_temp(), 78.0)
 
+
+class BackendTests(unittest.TestCase):
+    def test_legacy_config_migration(self):
+        data = {"max_duty": 198, "curve": [[0, 0], [64, 0], [65, 20], [80, 140], [95, 198]]}
+        migrated = backend.migrate_config(data)
+        self.assertEqual(migrated["max_duty"], 100)
+        self.assertEqual(
+            migrated["curve"],
+            [[0, 0], [64, 0], [65, 10], [80, 71], [95, 100]],
+        )
+
+    def test_percent_config_left_alone(self):
+        data = {"max_duty": 60, "curve": [[0, 0], [80, 50]]}
+        self.assertEqual(backend.migrate_config(data), data)
+
+    def test_tuxedo_duty_conversion(self):
+        class _Probe(backend.TuxedoIoBackend):
+            def __init__(self):
+                pass
+
+        probe = _Probe()
+        self.assertEqual(probe._pct_to_raw(100), 198)
+        self.assertEqual(probe._pct_to_raw(50), 99)
+        self.assertEqual(probe._raw_to_pct(198), 100)
+        self.assertEqual(probe._raw_to_pct(99), 50)
+
+    def test_clevo_backend_discovery_and_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = pathlib.Path(tmp)
+            for fan in (1, 2):
+                (base / f"fan{fan}_manual_duty").write_text("0")
+                (base / f"fan{fan}_duty").write_text("30")
+            (base / "fan1_temp").write_text("52")
+            (base / "fan2_temp").write_text("48")
+            (base / "fan_release").write_text("")
+            (base / "fan_watchdog_ping").write_text("")
+            (base / "fan_watchdog_timeout_ms").write_text("15000")
+
+            b = backend.ClevoAcpiBackend(base=base)
+            self.assertEqual(b.fans(), [1, 2])
+            self.assertEqual(b.read_duty(1), 30)
+            self.assertEqual(b.read_temp(), 52.0)
+            self.assertEqual(b.read_temp2(), 48.0)
+
+            b.write_duty(1, 150)  # clamps to 100
+            self.assertEqual((base / "fan1_manual_duty").read_text().strip(), "100")
+            b.release()
+            self.assertEqual((base / "fan_release").read_text().strip(), "1")
+            b.ping()
+            self.assertEqual((base / "fan_watchdog_ping").read_text().strip(), "1")
+
+    def test_clevo_missing_attributes_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(backend.FanBackendError):
+                backend.ClevoAcpiBackend(base=pathlib.Path(tmp))
+
+    def test_detect_backend_prefers_clevo(self):
+        fake = object()
+        with mock.patch.object(backend.ClevoAcpiBackend, "available", return_value=True), \
+                mock.patch.object(backend, "ClevoAcpiBackend", return_value=fake), \
+                mock.patch.object(backend, "TuxedoIoBackend") as tux:
+            self.assertIs(backend.detect_backend("auto"), fake)
+            tux.assert_not_called()
+
+    def test_detect_backend_explicit_tuxedo(self):
+        with mock.patch.object(backend, "TuxedoIoBackend") as tux:
+            backend.detect_backend("tuxedo_io", device="/dev/example_io")
+            tux.assert_called_once_with("/dev/example_io")
+
     def test_device_path_override(self):
         with mock.patch.dict(os.environ, {"FAN_CONTROL_DEVICE": "/dev/custom_fan_io"}):
-            self.assertEqual(daemon.find_ec_device(), "/dev/custom_fan_io")
-            self.assertEqual(gui.find_ec_device(), "/dev/custom_fan_io")
+            self.assertEqual(backend._find_ec_device(), "/dev/custom_fan_io")
 
 
 if __name__ == "__main__":

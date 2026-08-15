@@ -23,6 +23,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile fan-daemon.py fan-gui.py test_fan_control.py
+        run: python -m py_compile fan_backend.py fan-daemon.py fan-gui.py test_fan_control.py
       - name: Test
         run: python -m unittest -v

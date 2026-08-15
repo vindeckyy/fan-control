@@ -3,8 +3,6 @@
 
 import argparse
 import collections
-import ctypes
-import fcntl
 import http.server
 import json
 import math
@@ -17,92 +15,53 @@ import threading
 import time
 import webbrowser
 
-MAGIC_RD, MAGIC_WR = 0xEF, 0xF0
-IOC_R, IOC_W, SZ = 2, 1, 8
-SAFE_MAX_DUTY = 198
+from fan_backend import (
+    MAX_DUTY_PERCENT,
+    DemoBackend,
+    detect_backend,
+    migrate_config,
+)
+
+SAFE_MAX_DUTY = MAX_DUTY_PERCENT
 CONFIG_PATH = pathlib.Path(os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json"))
 
 
-def ioc(direction, kind, number, size):
-    return (direction << 30) | (kind << 8) | number | (size << 16)
-
-
-def find_ec_device():
-    configured = os.environ.get("FAN_CONTROL_DEVICE")
-    if configured:
-        return configured
-    candidates = sorted(pathlib.Path("/dev").glob("*_io"))
-    if len(candidates) == 1:
-        return str(candidates[0])
-    if not candidates:
-        raise FileNotFoundError("Clevo/Tongfang fan-control device not found")
-    raise FileNotFoundError("multiple fan-control devices found; set FAN_CONTROL_DEVICE")
-
-
-R_FS1 = ioc(IOC_R, MAGIC_RD, 0x10, SZ)
-R_FS2 = ioc(IOC_R, MAGIC_RD, 0x11, SZ)
-R_TEMP = ioc(IOC_R, MAGIC_RD, 0x12, SZ)
-R_TEMP2 = ioc(IOC_R, MAGIC_RD, 0x13, SZ)
-W_FS1 = ioc(IOC_W, MAGIC_WR, 0x10, SZ)
-W_FS2 = ioc(IOC_W, MAGIC_WR, 0x11, SZ)
-W_MODE = ioc(IOC_W, MAGIC_WR, 0x12, SZ)
-W_AUTO = ioc(0, MAGIC_WR, 0x14, 0)
-
 PROFILES = {
-    "silent": [(0, 0), (50, 0), (60, 0), (70, 60), (80, 120), (90, 170), (95, 198), (110, 198)],
-    "balanced": [(0, 0), (50, 0), (60, 50), (70, 100), (80, 150), (90, 180), (95, 198), (110, 198)],
-    "performance": [(0, 0), (50, 0), (60, 80), (70, 140), (80, 180), (85, 198), (110, 198)],
-    "custom": [(0, 0), (55, 0), (65, 55), (75, 110), (85, 165), (95, 198), (110, 198)],
+    "silent": [(0, 0), (50, 0), (60, 0), (70, 30), (80, 61), (90, 86), (95, 100), (110, 100)],
+    "balanced": [(0, 0), (50, 0), (60, 25), (70, 50), (80, 76), (90, 91), (95, 100), (110, 100)],
+    "performance": [(0, 0), (50, 0), (60, 40), (70, 71), (80, 91), (85, 100), (110, 100)],
+    "custom": [(0, 0), (55, 0), (65, 28), (75, 38), (85, 43), (95, 100), (110, 100)],
 }
 
-FD = None
-EC_LOCK = threading.RLock()
+BACKEND = None
 STATE_LOCK = threading.RLock()
 STOP = threading.Event()
 HISTORY = collections.deque(maxlen=900)  # 30 minutes at a 2s cadence
 DEMO = False
-_demo = {"fan1": 0, "fan2": 0}
-
-
-def rd(command):
-    if DEMO:
-        if command == R_FS1:
-            return _demo["fan1"]
-        if command == R_FS2:
-            return _demo["fan2"]
-        return round(62 + 10 * math.sin(time.monotonic() / 18)) + (2 if command == R_TEMP2 else 0)
-    with EC_LOCK:
-        buf = ctypes.c_int64()
-        fcntl.ioctl(FD, command, buf, True)
-        return buf.value & 0xFF
-
-
-def wr(command, value):
-    if DEMO:
-        if command == W_FS1:
-            _demo["fan1"] = int(value)
-        elif command == W_FS2:
-            _demo["fan2"] = int(value)
-        return
-    with EC_LOCK:
-        buf = ctypes.c_int64(int(value))
-        fcntl.ioctl(FD, command, buf, True)
 
 
 def lock_manual():
-    wr(W_MODE, 0x40)
+    BACKEND.lock()
 
 
 def release_manual():
-    if DEMO:
-        return
-    with EC_LOCK:
-        fcntl.ioctl(FD, W_AUTO)
+    BACKEND.release()
 
 
 def write_duty(fan, duty):
-    wr((W_FS1, W_FS2)[fan - 1], max(0, min(SAFE_MAX_DUTY, int(duty))))
+    BACKEND.write_duty(fan, max(0, min(SAFE_MAX_DUTY, int(duty))))
 
+
+def read_duty(fan):
+    return BACKEND.read_duty(fan)
+
+
+def read_ec_temp():
+    return BACKEND.read_temp()
+
+
+def read_ec_temp2():
+    return BACKEND.read_temp2()
 
 def normalize_curve(curve):
     if not isinstance(curve, list):
@@ -135,7 +94,7 @@ def interpolate(temp, curve):
 def load_config():
     try:
         data = json.loads(CONFIG_PATH.read_text())
-        return data if isinstance(data, dict) else {}
+        return migrate_config(data) if isinstance(data, dict) else {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
 
@@ -244,20 +203,27 @@ def readback_loop():
     global _readback
     while not STOP.is_set():
         try:
-            snap = {"fan1": rd(R_FS1), "fan2": rd(R_FS2), "ec_temp1": rd(R_TEMP), "ec_temp2": rd(R_TEMP2), "updated": time.time()}
+            fans = BACKEND.fans()
+            snap = {
+                "fan1": BACKEND.read_duty(1) if 1 in fans else 0,
+                "fan2": BACKEND.read_duty(2) if 2 in fans else 0,
+                "ec_temp1": read_ec_temp() or 0,
+                "ec_temp2": read_ec_temp2() or 0,
+                "updated": time.time(),
+            }
             with STATE_LOCK:
                 _readback = snap
         except OSError as exc:
             print(f"EC read failed: {exc}", file=sys.stderr)
         STOP.wait(0.25)
 
-
 def primary_temp():
     with STATE_LOCK:
         sensors = list(_sensor_cache)
         fallback = _readback["ec_temp1"]
-    k10 = [s["temp"] for s in sensors if s["name"] == "k10temp"]
-    return max(k10) if k10 else fallback if 0 < fallback <= 150 else None
+    cpu = [s["temp"] for s in sensors if s["name"] in ("k10temp", "coretemp")]
+    return max(cpu) if cpu else fallback if 0 < fallback <= 150 else None
+
 
 
 def gpu_temp():
@@ -386,7 +352,7 @@ details{border-top:1px solid var(--line);padding:14px 0}details:first-of-type{bo
 <section class="panel span2"><div class="sectionHead"><h2>30-minute history</h2><div class="legend"><span><i style="background:var(--amber)"></i>CPU temp</span><span><i style="background:var(--cyan)"></i>GPU temp</span><span><i style="background:var(--blue)"></i>Fan duty</span></div></div><div id="chartEmpty" class="empty">Collecting history…</div><svg id="chart" class="chart" viewBox="0 0 1000 160" preserveAspectRatio="none" hidden aria-label="CPU temperature, GPU temperature, and fan duty history"><line class="gridline" x1="0" y1="40" x2="1000" y2="40"/><line class="gridline" x1="0" y1="80" x2="1000" y2="80"/><line class="gridline" x1="0" y1="120" x2="1000" y2="120"/><polyline id="tempLine" class="tempLine"/><polyline id="gpuLine" class="gpuLine"/><polyline id="fanLine" class="fanLine"/></svg></section>
 
 <section class="panel span2"><details><summary>Custom fan curve</summary><div class="curveRows" id="curveRows"></div><div class="actions"><button class="secondary" id="addPoint">Add point</button><button class="primary" id="applyCurve">Apply curve</button></div></details>
-<details><summary>Safety &amp; preferences</summary><div class="settings"><div class="setting"><label>Link fans<span>Move both sliders together</span></label><input id="linked" type="checkbox" checked></div><div class="setting"><label>Maximum duty<span>Noise cap; critical cooling bypasses it</span></label><input id="maxDuty" type="number" min="20" max="198"></div><div class="setting"><label>Curve hysteresis<span>Prevents rapid speed hunting</span></label><input id="hysteresis" type="number" min="0" max="30"></div><div class="setting"><label>Critical temperature<span>Forces safe maximum duty</span></label><input id="criticalTemp" type="number" min="70" max="110"></div><div class="setting"><label>Temperature alerts<span>Browser alert at critical temperature</span></label><button class="secondary" id="notifications">Enable</button></div><div class="setting"><label>Hardware control<span>Return control to firmware immediately</span></label><button class="secondary danger" id="release">Release to EC</button></div></div></details></section>
+<details><summary>Safety &amp; preferences</summary><div class="settings"><div class="setting"><label>Link fans<span>Move both sliders together</span></label><input id="linked" type="checkbox" checked></div><div class="setting"><label>Maximum duty<span>Noise cap; critical cooling bypasses it</span></label><input id="maxDuty" type="number" min="20" max="100"></div><div class="setting"><label>Curve hysteresis<span>Prevents rapid speed hunting</span></label><input id="hysteresis" type="number" min="0" max="30"></div><div class="setting"><label>Critical temperature<span>Forces safe maximum duty</span></label><input id="criticalTemp" type="number" min="70" max="110"></div><div class="setting"><label>Temperature alerts<span>Browser alert at critical temperature</s…
 </div></main><div class="toast" id="toast" role="status"></div>
 <script>
 const $=id=>document.getElementById(id), ui={linked:true,state:null,notified:false};
@@ -394,7 +360,7 @@ const esc=value=>String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;'
 const toast=message=>{const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),2200)};
 async function api(path,options={}){const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||`Request failed (${response.status})`);return response.json()}
 const post=(path,body)=>api(path,{method:'POST',body:JSON.stringify(body)});
-const dutyPct=(duty,cap)=>Math.min(100,Math.round(100*duty/cap));
+
 function setRange(id,value){const el=$(id);el.value=value;el.style.setProperty('--fill',`${value}%`);$(`${id}Value`).textContent=value}
 async function setFan(fan,value){setRange(`fan${fan}`,value);await post('/set',{fan,pct:value});if(ui.linked){const other=fan===1?2:1;setRange(`fan${other}`,value);await post('/set',{fan:other,pct:value})}}
 for(const fan of [1,2])$('fan'+fan).addEventListener('input',event=>setFan(fan,+event.target.value).catch(e=>toast(e.message)));
@@ -403,12 +369,12 @@ $('presets').addEventListener('click',event=>{const button=event.target.closest(
 $('modes').addEventListener('click',async event=>{const button=event.target.closest('button');if(!button)return;try{if(button.dataset.profile)await post('/profile',{profile:button.dataset.profile});else await post('/mode',{mode:button.dataset.mode});await update();toast(button.textContent+' mode enabled')}catch(e){toast(e.message)}});
 $('release').addEventListener('click',()=>post('/mode',{mode:'released'}).then(update).catch(e=>toast(e.message)));
 for(const id of ['maxDuty','hysteresis','criticalTemp'])$(id).addEventListener('change',event=>{const keys={maxDuty:'max_duty',hysteresis:'hysteresis',criticalTemp:'critical_temp'};post('/config',{[keys[id]]:+event.target.value}).then(()=>toast('Setting saved')).catch(e=>toast(e.message))});
-function renderCurve(curve){$('curveRows').innerHTML=curve.map(([temp,duty],index)=>`<div class="curveRow"><input class="curveTemp" type="number" min="0" max="150" value="${temp}" aria-label="Temperature point ${index+1}"><span>°C →</span><input class="curveDuty" type="number" min="0" max="198" value="${duty}" aria-label="Duty point ${index+1}"><button class="iconBtn danger" data-remove="${index}" aria-label="Remove point">×</button></div>`).join('')}
+function renderCurve(curve){$('curveRows').innerHTML=curve.map(([temp,duty],index)=>`<div class="curveRow"><input class="curveTemp" type="number" min="0" max="150" value="${temp}" aria-label="Temperature point ${index+1}"><span>°C →</span><input class="curveDuty" type="number" min="0" max="100" value="${duty}" aria-label="Duty point ${index+1}"><button class="iconBtn danger" data-remove="${index}" aria-label="Remove point">×</button></div>`).join('')}
 $('curveRows').addEventListener('click',event=>{if(event.target.dataset.remove!==undefined){event.target.closest('.curveRow').remove()}});
-$('addPoint').addEventListener('click',()=>{const rows=[...document.querySelectorAll('.curveRow')],last=rows.at(-1),curve=rows.map(r=>[+r.querySelector('.curveTemp').value,+r.querySelector('.curveDuty').value]);curve.push(last?[Math.min(150,curve.at(-1)[0]+5),Math.min(198,curve.at(-1)[1]+10)]:[60,50]);renderCurve(curve)});
+$('addPoint').addEventListener('click',()=>{const rows=[...document.querySelectorAll('.curveRow')],last=rows.at(-1),curve=rows.map(r=>[+r.querySelector('.curveTemp').value,+r.querySelector('.curveDuty').value]);curve.push(last?[Math.min(150,curve.at(-1)[0]+5),Math.min(100,curve.at(-1)[1]+10)]:[60,50]);renderCurve(curve)});
 $('applyCurve').addEventListener('click',()=>{const curve=[...document.querySelectorAll('.curveRow')].map(r=>[+r.querySelector('.curveTemp').value,+r.querySelector('.curveDuty').value]);post('/custom',{curve}).then(()=>{toast('Custom curve active');update()}).catch(e=>toast(e.message))});
-function chart(history){const visible=history.length>=2;$('chart').toggleAttribute('hidden',!visible);$('chartEmpty').toggleAttribute('hidden',visible);if(!visible)return;const start=history[0].time,end=history.at(-1).time||start+1,x=p=>1000*(p.time-start)/(end-start||1),tempY=value=>(150-Math.min(110,value)*1.35).toFixed(1),tempPoints=history.filter(p=>p.temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.temp)}`).join(' '),gpuPoints=history.filter(p=>p.gpu_temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.gpu_temp)}`).join(' '),fanPoints=history.map(p=>`${x(p).toFixed(1)},${(150-Math.min(198,p.fan1)*.72).toFixed(1)}`).join(' ');$('tempLine').setAttribute('points',tempPoints);$('gpuLine').setAttribute('points',gpuPoints);$('fanLine').setAttribute('points',fanPoints)}
-function render(s){ui.state=s;const temp=s.control_temp;$('primaryTemp').textContent=temp==null?'--':temp.toFixed(1);$('modeName').textContent=s.mode==='released'?'EC Auto':s.mode==='curve'?s.profile[0].toUpperCase()+s.profile.slice(1):'Manual';$('connection').textContent=Date.now()/1000-s.updated<3?'Live':'Readback delayed';$('dot').style.background=Date.now()/1000-s.updated<3?'var(--cyan)':'var(--amber)';const manual=s.mode==='manual';for(const fan of [1,2]){const duty=s['fan'+fan];$(`fan${fan}Raw`).textContent=`Raw duty ${duty} · actual ${dutyPct(duty,s.max_duty)}%`;$(`fan${fan}`).disabled=!manual;if(document.activeElement!==$(`fan${fan}`))setRange(`fan${fan}`,s.targets[fan])}$('presets').querySelectorAll('button').forEach(b=>b.disabled=!manual);document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('active',b.dataset.mode===s.mode||s.mode==='curve'&&b.dataset.profile===s.profile));$('maxDuty').value=s.max_duty;$('hysteresis').value=s.hysteresis;$('criticalTemp').value=s.critical_temp;if(!$('curveRows').children.length)renderCurve(s.custom_curve);$('sensorCount').textContent=`${s.temps.length} detected`;$('sensors').innerHTML=s.temps.length?s.temps.map(t=>`<div class="sensor"><span>${esc(t.name)} · ${esc(t.label)}</span><b>${t.temp.toFixed(1)}°C</b></div>`).join(''):'<div class="empty">No hwmon sensors found</div>';if(temp>=s.critical_temp&&!ui.notified&&Notification.permission==='granted'){new Notification('Fan Control',{body:`Critical control temperature: ${temp.toFixed(1)}°C. Maximum cooling engaged.`});ui.notified=true}if(temp<s.critical_temp-5)ui.notified=false}
+function chart(history){const visible=history.length>=2;$('chart').toggleAttribute('hidden',!visible);$('chartEmpty').toggleAttribute('hidden',visible);if(!visible)return;const start=history[0].time,end=history.at(-1).time||start+1,x=p=>1000*(p.time-start)/(end-start||1),tempY=value=>(150-Math.min(110,value)*1.35).toFixed(1),tempPoints=history.filter(p=>p.temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.temp)}`).join(' '),gpuPoints=history.filter(p=>p.gpu_temp!=null).map(p=>`${x(p).toFixed(1)},${tempY(p.gpu_temp)}`).join(' '),fanPoints=history.map(p=>`${x(p).toFixed(1)},${(150-Math.min(100,p.fan1)*.72).toFixed(1)}`).join(' ');$('tempLine').setAttribute('points',tempPoints);$('gpuLine').setAttribute('points',gpuPoints);$('fanLine').setAttribute('points',fanPoints)}
+function render(s){ui.state=s;const temp=s.control_temp;$('primaryTemp').textContent=temp==null?'--':temp.toFixed(1);$('modeName').textContent=s.mode==='released'?'EC Auto':s.mode==='curve'?s.profile[0].toUpperCase()+s.profile.slice(1):'Manual';$('connection').textContent=Date.now()/1000-s.updated<3?'Live':'Readback delayed';$('dot').style.background=Date.now()/1000-s.updated<3?'var(--cyan)':'var(--amber)';const manual=s.mode==='manual';for(const fan of [1,2]){const duty=s['fan'+fan];$(`fan${fan}Raw`).textContent=`Duty ${duty}%`;$(`fan${fan}`).disabled=!manual;if(document.activeElement!==$(`fan${fan}`))setRange(`fan${fan}`,s.targets[fan])}$('presets').querySelectorAll('button').forEach(b=>b.disabled=!manual);document.querySelectorAll('#modes button').forEach(b=>b.classList.toggle('active',b.dataset.mode===s.mode||s.mode==='curve'&&b.dataset.profile===s.profile));$('maxDuty').value=s.max_duty;$('hysteresis').value=s.hysteresis;$('criticalTemp').value=s.critical_temp;if(!$('curveRows').children.length)renderCurve(s.custom_curve);$('sensorCount').textContent=`${s.temps.length} detected`;$('sensors').innerHTML=s.temps.length?s.temps.map(t=>`<div class="sensor"><span>${esc(t.name)} · ${esc(t.label)}</span><b>${t.temp.toFixed(1)}°C</b></div>`).join(''):'<div class="empty">No hwmon sensors found</div>';if(temp>=s.critical_temp&&!ui.notified&&Notification.permission==='granted'){new Notification('Fan Control',{body:`Critical control temperature: ${temp.toFixed(1)}°C. Maximum cooling engaged.`});ui.notified=true}if(temp<s.critical_temp-5)ui.notified=false}
 async function update(){try{render(await api('/snapshot'));const h=await api('/history');chart(h.history)}catch(e){$('connection').textContent='Disconnected';$('dot').style.background='var(--red)'}}
 $('notifications').addEventListener('click',async()=>{if(!('Notification'in window))return toast('Notifications are not supported');const permission=await Notification.requestPermission();toast(permission==='granted'?'Temperature alerts enabled':'Notifications not enabled')});
 function applyTheme(theme){document.documentElement.dataset.theme=theme;localStorage.setItem('fan-theme',theme);$('theme').textContent=theme==='dark'?'☼':'☾'}applyTheme(localStorage.getItem('fan-theme')||'dark');$('theme').addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
@@ -527,39 +493,38 @@ def stop_daemon():
             break
         time.sleep(0.05)
 
-
 def shutdown(*_):
-    global FD
+    global BACKEND
     if STOP.is_set():
         return
     STOP.set()
-    if DEMO:
-        release_manual()
-    elif FD is not None:
-        with EC_LOCK:
-            try:
-                fcntl.ioctl(FD, W_AUTO)
-            except OSError:
-                pass
-            os.close(FD)
-            FD = None
+    if BACKEND is not None:
+        try:
+            BACKEND.release()
+        except OSError:
+            pass
+        BACKEND.close()
     if not DEMO:
         subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True)
 
 
+
 def main():
-    global FD, DEMO
+    global BACKEND, DEMO
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", action="store_true", help="run with simulated hardware")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--port", type=int, default=4444)
-    parser.add_argument("--device", help="kernel device path (or set FAN_CONTROL_DEVICE)")
+    parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
+    parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
     args = parser.parse_args()
     DEMO = args.demo
-    if not DEMO:
+    if DEMO:
+        BACKEND = DemoBackend()
+    else:
         stop_daemon()
         try:
-            FD = os.open(args.device or find_ec_device(), os.O_RDWR)
+            BACKEND = detect_backend(args.backend, args.device)
         except PermissionError:
             sys.exit("need root")
         except FileNotFoundError as exc:

@@ -42,16 +42,28 @@ small, dependency-free, and bound to localhost.
 
 ## Compatibility
 
-Fan Control is intended for Linux systems that meet all of these requirements:
+Fan Control supports two hardware backends on Linux. It auto-detects which
+one is present; use `--backend` or `FAN_CONTROL_BACKEND` to override.
 
 | Requirement | Details |
 | --- | --- |
 | Hardware | Clevo/Tongfang-based system with a compatible EC interface |
-| Kernel interface | A supported character device matching `/dev/*_io` |
+| Backend | `tuxedo_io` (ioctls on a `/dev/*_io` device) or `clevo_acpi` (sysfs) |
+| clevo_acpi | Requires `clevo-acpi-dkms` with fan duty attributes |
 | Runtime | Python 3.10 or newer; standard library only |
 | Privileges | Root access for EC reads and writes |
 | Service manager | systemd for the included background service |
 | NVIDIA telemetry | Optional; requires a working `nvidia-smi` command |
+
+The `tuxedo_io` backend drives duty through ioctls on a character device
+matching `/dev/*_io`. The `clevo_acpi` backend drives per-fan duty through
+plain sysfs files under `/sys/class/leds/clevo-acpi::kbd_backlight/device/`,
+and relies on that driver's kernel-side watchdog to return control to
+firmware auto if the controlling process stops. The sysfs interface comes
+from [clevo-acpi-dkms](https://github.com/arbitrary-string/clevo-acpi-dkms)
+(GPL-2.0-or-later); its semantics were verified against that driver and the
+[clevo-control-panel](https://github.com/arbitrary-string/clevo-control-panel)
+(GPL-3.0) reference daemon.
 
 Hardware compatibility varies by model and firmware. Start with demo mode,
 then verify sensor readings and fan response before enabling the service.
@@ -60,12 +72,16 @@ then verify sensor readings and fan response before enabling the service.
 
 Fan Control treats thermal control as a safety-critical path:
 
-- All normal writes are clamped to duty `198`; values near `200` are known to
-  behave unpredictably on affected firmware.
-- At `critical_temp`, both fans are commanded to duty `198` even when a lower
-  noise cap is configured.
+- Duty is authored as a percentage 0-100. The `tuxedo_io` backend maps this
+  onto its native raw 0-198 domain at the edge, keeping the known-safe cap of
+  198; values near 200 are known to behave unpredictably on affected firmware.
+- At `critical_temp`, both fans are commanded to 100% even when a lower noise
+  cap is configured.
 - After three invalid temperature readings, the daemon returns control to the
   system firmware until valid telemetry returns.
+- On the `clevo_acpi` backend, the kernel-side watchdog independently releases
+  to firmware auto if the controlling process stops renewing a manual override,
+  so a crashed or killed daemon cannot leave a fan stuck at a stale speed.
 - The dashboard and daemon never intentionally own the EC interface at the
   same time.
 
@@ -76,7 +92,8 @@ Fan Control treats thermal control as a safety-critical path:
 
 ## Installation
 
-Clone the repository and install the two executables plus the service unit:
+Clone the repository and install the two executables, the backend module, and
+the service unit:
 
 ```bash
 git clone https://github.com/vindeckyy/fan-control.git
@@ -84,6 +101,7 @@ cd fan-control
 
 sudo install -Dm755 fan-daemon.py /usr/local/bin/fan-daemon
 sudo install -Dm755 fan-gui.py /usr/local/bin/fan-gui
+sudo install -Dm644 fan_backend.py /usr/local/bin/fan_backend.py
 sudo install -Dm644 fan-daemon.service /etc/systemd/system/fan-daemon.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now fan-daemon
@@ -134,7 +152,7 @@ atomically when settings change.
 ```json
 {
   "profile": "balanced",
-  "max_duty": 198,
+  "max_duty": 100,
   "hysteresis": 5,
   "critical_temp": 95
 }
@@ -144,14 +162,17 @@ atomically when settings change.
 | --- | ---: | --- |
 | `profile` | `balanced` | Active automatic curve |
 | `curve` | built-in | Custom `[temperature, duty]` points |
-| `max_duty` | `198` | Normal-operation noise cap |
+| `max_duty` | `100` | Normal-operation noise cap, as a percentage |
 | `hysteresis` | `5` | Minimum duty change before curve updates |
 | `critical_temp` | `95` | Temperature that forces maximum safe duty |
 
-Device discovery selects the sole `/dev/*_io` candidate. If multiple
-candidates exist, set `FAN_CONTROL_DEVICE` or pass `--device` explicitly:
+Backend selection is automatic: clevo-acpi sysfs is preferred when its fan
+attributes exist, otherwise `tuxedo_io` on the sole `/dev/*_io` device. Set
+`FAN_CONTROL_BACKEND` or pass `--backend` to override. For `tuxedo_io`, set
+`FAN_CONTROL_DEVICE` or pass `--device` when multiple candidates exist:
 
 ```bash
+sudo FAN_CONTROL_BACKEND=clevo_acpi fan-gui
 sudo FAN_CONTROL_DEVICE=/dev/example_io fan-gui
 ```
 
@@ -161,27 +182,44 @@ sudo FAN_CONTROL_DEVICE=/dev/example_io fan-gui
 hwmon / NVIDIA telemetry ──► temperature selection ──► curve + safety policy
                                                               │
                                                               ▼
-firmware auto ◄── ownership handoff ◄── serialized EC access ◄── duty target
-                                      ▲
-                                      │
-                         localhost web dashboard
+        ┌────── clevo_acpi sysfs ───────┐  ◄── duty target ──┘
+        │                                │
+backend ┼──── tuxedo_io ioctls ─────────┤  ◄── percent duty
+        │                                │
+        └──── demo (simulated) ──────────┘
+                         │
+                         ▼
+       firmware auto ◄── ownership handoff ◄── watchdog / release
 ```
 
+- `fan_backend.py` defines the backend abstraction and three implementations.
 - `fan-daemon.py` owns automatic background control.
 - `fan-gui.py` serves the local dashboard and interactive control API.
 - `fan-daemon.service` starts the daemon at boot.
 - `test_fan_control.py` covers interpolation, safety bounds, curve validation,
-  device overrides, dashboard contracts, and NVIDIA parsing.
+  backend discovery, duty conversion, legacy config migration, dashboard
+  contracts, and NVIDIA parsing.
 
 ## Troubleshooting
 
-### No fan-control device found
+### No fan-control hardware found
 
-Confirm that the compatible kernel interface is loaded and that a character
-device exists:
+Run the built-in diagnostic to see which backend is available:
+
+```bash
+sudo fan-daemon --diagnose
+```
+
+For `tuxedo_io`, confirm a character device exists:
 
 ```bash
 ls -l /dev/*_io
+```
+
+For `clevo_acpi`, confirm the fan attributes exist:
+
+```bash
+ls /sys/class/leds/clevo-acpi::kbd_backlight/device/fan*_manual_duty
 ```
 
 ### Dashboard does not open
@@ -207,7 +245,7 @@ nvidia-smi --query-gpu=index,temperature.gpu,name --format=csv,noheader,nounits
 The project intentionally uses only the Python standard library.
 
 ```bash
-python3 -m py_compile fan-daemon.py fan-gui.py test_fan_control.py
+python3 -m py_compile fan_backend.py fan-daemon.py fan-gui.py test_fan_control.py
 python3 -m unittest -v
 ```
 
