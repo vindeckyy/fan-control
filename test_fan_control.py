@@ -124,6 +124,22 @@ class BackendTests(unittest.TestCase):
             backend.detect_backend("tuxedo_io", device="/dev/example_io")
             tux.assert_called_once_with("/dev/example_io")
 
+    def test_detect_backend_env_override(self):
+        with mock.patch.object(backend, "TuxedoIoBackend") as tux, \
+                mock.patch.dict(os.environ, {"FAN_CONTROL_BACKEND": "tuxedo_io"}):
+            backend.detect_backend(None, device="/dev/example_io")
+            tux.assert_called_once_with("/dev/example_io")
+
+    def test_detect_backend_arg_beats_env(self):
+        fake = object()
+        with mock.patch.object(backend, "ClevoAcpiBackend", return_value=fake), \
+                mock.patch.dict(os.environ, {"FAN_CONTROL_BACKEND": "tuxedo_io"}):
+            self.assertIs(backend.detect_backend("clevo_acpi"), fake)
+
+    def test_detect_backend_rejects_unknown(self):
+        with self.assertRaises(backend.FanBackendError):
+            backend.detect_backend("bogus")
+
     def test_device_path_override(self):
         with mock.patch.dict(os.environ, {"FAN_CONTROL_DEVICE": "/dev/custom_fan_io"}):
             self.assertEqual(backend._find_ec_device(), "/dev/custom_fan_io")

@@ -296,7 +296,17 @@ def _find_ec_device():
 
 
 def detect_backend(backend=None, device=None):
-    """Resolve an explicit or auto-detected backend instance."""
+    """Resolve an explicit or auto-detected backend instance.
+
+    ``backend`` wins over ``FAN_CONTROL_BACKEND``; both accept the same
+    ``auto`` / ``tuxedo_io`` / ``clevo_acpi`` values. ``auto`` (or no
+    override) prefers clevo-acpi sysfs when present, else tuxedo_io.
+    """
+    backend = backend or os.environ.get("FAN_CONTROL_BACKEND") or "auto"
+    if backend not in ("auto", "tuxedo_io", "clevo_acpi"):
+        raise FanBackendError(
+            f"unknown backend {backend!r}; expected auto, tuxedo_io, or clevo_acpi"
+        )
     if backend == "clevo_acpi":
         return ClevoAcpiBackend()
     if backend == "tuxedo_io":
