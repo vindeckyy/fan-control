@@ -3,12 +3,14 @@
 
 Two kernel interfaces share one policy layer:
 
-- ``tuxedo_io``: ioctls on a ``/dev/*_io`` character device, raw duty 0-198.
+- ``tuxedo_io``: ioctls on a ``/dev/*_io`` character device supporting both
+  Uniwill (raw duty 0-198) and Clevo (raw duty 0-255) hardware interfaces.
 - ``clevo_acpi``: sysfs files under the ``clevo-acpi`` platform device,
   per-fan duty 0-100, with a kernel-side dead-man's-switch.
 
 Backends expose duty as a percentage 0-100. ``tuxedo_io`` translates to its
-native 0-198 value at the edge; ``clevo_acpi`` is already in percent.
+native raw domain (0-255 for Clevo, 0-198 for Uniwill) at the edge; ``clevo_acpi``
+is already in percent.
 
 The clevo-acpi sysfs interface comes from ``arbitrary-string/clevo-acpi-dkms``
 (GPL-2.0-or-later). Its semantics were read from that driver source and from
@@ -27,33 +29,54 @@ import time
 
 MAX_DUTY_PERCENT = 100
 
-# tuxedo_io ioctl encoding. Raw duty domain is 0-198; values near 200 are
-# known to behave unpredictably on affected firmware.
-MAGIC_RD, MAGIC_WR = 0xEF, 0xF0
-IOC_R, IOC_W, SZ = 2, 1, 8
+# tuxedo_io ioctl encoding.
+# The tuxedo_io module supports both Uniwill (raw duty 0-198) and Clevo (raw duty 0-255)
+# hardware interfaces with distinct ioctl magic numbers and structures.
+IOCTL_MAGIC = 0xEC
 
-R_FS1 = None
-R_FS2 = None
-R_TEMP = None
-R_TEMP2 = None
-W_FS1 = None
-W_FS2 = None
-W_MODE = None
-W_AUTO = None
+MAGIC_READ_CL = IOCTL_MAGIC + 1   # 0xED
+MAGIC_WRITE_CL = IOCTL_MAGIC + 2  # 0xEE
+
+MAGIC_READ_UW = IOCTL_MAGIC + 3   # 0xEF
+MAGIC_WRITE_UW = IOCTL_MAGIC + 4  # 0xF0
+
+IOC_NONE, IOC_W, IOC_R = 0, 1, 2
+SZ = ctypes.sizeof(ctypes.c_void_p)  # 8 on 64-bit platforms
 
 
-def ioc(direction, kind, number, size):
+def ioc(direction, kind, number, size=SZ):
     return (direction << 30) | (kind << 8) | number | (size << 16)
 
 
-R_FS1 = ioc(IOC_R, MAGIC_RD, 0x10, SZ)
-R_FS2 = ioc(IOC_R, MAGIC_RD, 0x11, SZ)
-R_TEMP = ioc(IOC_R, MAGIC_RD, 0x12, SZ)
-R_TEMP2 = ioc(IOC_R, MAGIC_RD, 0x13, SZ)
-W_FS1 = ioc(IOC_W, MAGIC_WR, 0x10, SZ)
-W_FS2 = ioc(IOC_W, MAGIC_WR, 0x11, SZ)
-W_MODE = ioc(IOC_W, MAGIC_WR, 0x12, SZ)
-W_AUTO = ioc(0, MAGIC_WR, 0x14, 0)
+# Hardware detection
+R_HWCHECK_CL = ioc(IOC_R, IOCTL_MAGIC, 0x05, SZ)
+R_HWCHECK_UW = ioc(IOC_R, IOCTL_MAGIC, 0x06, SZ)
+
+# Clevo interface
+R_CL_FANINFO1 = ioc(IOC_R, MAGIC_READ_CL, 0x10, SZ)
+R_CL_FANINFO2 = ioc(IOC_R, MAGIC_READ_CL, 0x11, SZ)
+R_CL_FANINFO3 = ioc(IOC_R, MAGIC_READ_CL, 0x12, SZ)
+W_CL_FANSPEED = ioc(IOC_W, MAGIC_WRITE_CL, 0x10, SZ)
+W_CL_FANAUTO = ioc(IOC_W, MAGIC_WRITE_CL, 0x11, SZ)
+
+# Uniwill interface
+R_UW_FANSPEED = ioc(IOC_R, MAGIC_READ_UW, 0x10, SZ)
+R_UW_FANSPEED2 = ioc(IOC_R, MAGIC_READ_UW, 0x11, SZ)
+R_UW_FAN_TEMP = ioc(IOC_R, MAGIC_READ_UW, 0x12, SZ)
+R_UW_FAN_TEMP2 = ioc(IOC_R, MAGIC_READ_UW, 0x13, SZ)
+R_UW_MODE = ioc(IOC_R, MAGIC_READ_UW, 0x14, SZ)
+W_UW_FANSPEED = ioc(IOC_W, MAGIC_WRITE_UW, 0x10, SZ)
+W_UW_FANSPEED2 = ioc(IOC_W, MAGIC_WRITE_UW, 0x11, SZ)
+W_UW_MODE = ioc(IOC_W, MAGIC_WRITE_UW, 0x12, SZ)
+W_UW_FANAUTO = ioc(IOC_NONE, MAGIC_WRITE_UW, 0x14, 0)
+
+# Backwards compatibility aliases
+MAGIC_RD, MAGIC_WR = MAGIC_READ_UW, MAGIC_WRITE_UW
+R_FS1, R_FS2 = R_UW_FANSPEED, R_UW_FANSPEED2
+R_TEMP, R_TEMP2 = R_UW_FAN_TEMP, R_UW_FAN_TEMP2
+W_FS1, W_FS2 = W_UW_FANSPEED, W_UW_FANSPEED2
+W_MODE = W_UW_MODE
+W_AUTO = W_UW_FANAUTO
 
 # The clevo-acpi fan attributes live on the platform device reached through
 # the LED classdev symlink. This is how the reference project resolves it.
@@ -111,24 +134,52 @@ class FanBackend:
 class TuxedoIoBackend(FanBackend):
     name = "tuxedo_io"
     NATIVE_MAX = TUXEDO_NATIVE_MAX
+    CLEVO_NATIVE_MAX = 255
 
     def __init__(self, path):
         self.fd = os.open(path, os.O_RDWR)
         self._lock = threading.RLock()
+        self._duties = {1: 0, 2: 0, 3: 0}
+        self.is_clevo = self._detect_clevo()
+
+    def _detect_clevo(self):
+        buf = ctypes.c_int32()
+        try:
+            fcntl.ioctl(self.fd, R_HWCHECK_UW, buf, True)
+            if buf.value == 1:
+                return False
+        except OSError:
+            pass
+
+        try:
+            fcntl.ioctl(self.fd, R_HWCHECK_CL, buf, True)
+            if buf.value == 1:
+                return True
+        except OSError:
+            pass
+
+        # Fallback heuristic: check if Clevo WMI GUID or module exists
+        if pathlib.Path("/sys/bus/wmi/devices/ABBC0F6D-8EA1-11D1-00A0-C90629100000-3").exists():
+            return True
+        return False
+
+    @property
+    def native_max(self):
+        return self.CLEVO_NATIVE_MAX if getattr(self, "is_clevo", False) else self.NATIVE_MAX
 
     def _pct_to_raw(self, percent):
-        return round(int(percent) * self.NATIVE_MAX / MAX_DUTY_PERCENT)
+        return round(int(percent) * self.native_max / MAX_DUTY_PERCENT)
 
     def _raw_to_pct(self, raw):
-        return round(int(raw) * MAX_DUTY_PERCENT / self.NATIVE_MAX)
+        return round(int(raw) * MAX_DUTY_PERCENT / self.native_max)
 
     def _read(self, command):
-        buf = ctypes.c_int64()
+        buf = ctypes.c_int32()
         fcntl.ioctl(self.fd, command, buf, True)
-        return buf.value & 0xFF
+        return buf.value
 
     def _write(self, command, value):
-        buf = ctypes.c_int64(int(value))
+        buf = ctypes.c_int32(int(value))
         fcntl.ioctl(self.fd, command, buf, True)
 
     def fans(self):
@@ -136,32 +187,64 @@ class TuxedoIoBackend(FanBackend):
 
     def lock(self):
         with self._lock:
-            self._write(W_MODE, 0x40)
+            if not getattr(self, "is_clevo", False):
+                self._write(W_UW_MODE, 0x40)
 
     def release(self):
         with self._lock:
-            fcntl.ioctl(self.fd, W_AUTO)
+            if getattr(self, "is_clevo", False):
+                self._write(W_CL_FANAUTO, 0)
+            else:
+                fcntl.ioctl(self.fd, W_UW_FANAUTO)
 
     def write_duty(self, fan, percent):
-        value = max(0, min(self.NATIVE_MAX, self._pct_to_raw(percent)))
+        percent = max(0, min(MAX_DUTY_PERCENT, int(percent)))
         with self._lock:
-            self._write((W_FS1, W_FS2)[fan - 1], value)
+            self._duties[fan] = percent
+            if getattr(self, "is_clevo", False):
+                raw1 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(1, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+                raw2 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(2, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+                raw3 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(3, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+                arg = (raw1 & 0xFF) | ((raw2 & 0xFF) << 8) | ((raw3 & 0xFF) << 16)
+                self._write(W_CL_FANSPEED, arg)
+            else:
+                value = max(0, min(self.NATIVE_MAX, self._pct_to_raw(percent)))
+                cmd = (W_UW_FANSPEED, W_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else W_UW_FANSPEED
+                self._write(cmd, value)
 
     def read_duty(self, fan):
         with self._lock:
-            return self._raw_to_pct(self._read((R_FS1, R_FS2)[fan - 1]))
+            if getattr(self, "is_clevo", False):
+                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1] if fan in (1, 2, 3) else R_CL_FANINFO1
+                raw = self._read(cmd) & 0xFF
+                return round(raw * MAX_DUTY_PERCENT / self.CLEVO_NATIVE_MAX)
+            else:
+                cmd = (R_UW_FANSPEED, R_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else R_UW_FANSPEED
+                return self._raw_to_pct(self._read(cmd) & 0xFF)
 
     def read_temp(self):
         try:
             with self._lock:
-                return float(self._read(R_TEMP))
+                if getattr(self, "is_clevo", False):
+                    val = self._read(R_CL_FANINFO1)
+                    temp = (val >> 8) & 0xFF
+                    return float(temp) if 0 < temp <= 150 else None
+                else:
+                    raw = self._read(R_UW_FAN_TEMP) & 0xFF
+                    return float(raw) if 0 < raw <= 150 else None
         except OSError:
             return None
 
     def read_temp2(self):
         try:
             with self._lock:
-                return float(self._read(R_TEMP2))
+                if getattr(self, "is_clevo", False):
+                    val = self._read(R_CL_FANINFO2)
+                    temp = (val >> 8) & 0xFF
+                    return float(temp) if 0 < temp <= 150 else None
+                else:
+                    raw = self._read(R_UW_FAN_TEMP2) & 0xFF
+                    return float(raw) if 0 < raw <= 150 else None
         except OSError:
             return None
 

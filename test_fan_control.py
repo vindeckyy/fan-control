@@ -81,6 +81,82 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(probe._raw_to_pct(198), 100)
         self.assertEqual(probe._raw_to_pct(99), 50)
 
+    def test_tuxedo_clevo_duty_conversion(self):
+        class _Probe(backend.TuxedoIoBackend):
+            def __init__(self):
+                self.is_clevo = True
+
+        probe = _Probe()
+        self.assertEqual(probe._pct_to_raw(100), 255)
+        self.assertEqual(probe._pct_to_raw(0), 0)
+        self.assertEqual(probe._raw_to_pct(255), 100)
+        self.assertEqual(probe._raw_to_pct(0), 0)
+
+    def test_tuxedo_clevo_reads_and_writes(self):
+        class _Probe(backend.TuxedoIoBackend):
+            def __init__(self):
+                self.is_clevo = True
+                self._lock = mock.MagicMock()
+                self._duties = {1: 0, 2: 0, 3: 0}
+                self.written = []
+
+            def _write(self, cmd, val):
+                self.written.append((cmd, val))
+
+            def _read(self, cmd):
+                if cmd == backend.R_CL_FANINFO1:
+                    # Low byte: raw duty 128 (~50%), second byte: 55°C, high 16 bits: RPM
+                    return 128 | (55 << 8) | (2400 << 16)
+                if cmd == backend.R_CL_FANINFO2:
+                    return 255 | (60 << 8) | (3200 << 16)
+                return 0
+
+        probe = _Probe()
+        self.assertEqual(probe.read_duty(1), 50)
+        self.assertEqual(probe.read_duty(2), 100)
+        self.assertEqual(probe.read_temp(), 55.0)
+        self.assertEqual(probe.read_temp2(), 60.0)
+
+        probe.write_duty(1, 100)
+        raw1 = probe._pct_to_raw(100)
+        self.assertEqual(probe.written[-1], (backend.W_CL_FANSPEED, raw1))
+
+        probe.release()
+        self.assertEqual(probe.written[-1], (backend.W_CL_FANAUTO, 0))
+
+    def test_tuxedo_uniwill_reads_and_writes(self):
+        class _Probe(backend.TuxedoIoBackend):
+            def __init__(self):
+                self.is_clevo = False
+                self._lock = mock.MagicMock()
+                self._duties = {1: 0, 2: 0, 3: 0}
+                self.written = []
+                self.fd = 42
+
+            def _write(self, cmd, val):
+                self.written.append((cmd, val))
+
+            def _read(self, cmd):
+                if cmd == backend.R_UW_FANSPEED:
+                    return 99  # 50% of 198
+                if cmd == backend.R_UW_FAN_TEMP:
+                    return 48
+                return 0
+
+        probe = _Probe()
+        self.assertEqual(probe.read_duty(1), 50)
+        self.assertEqual(probe.read_temp(), 48.0)
+
+        probe.lock()
+        self.assertEqual(probe.written[-1], (backend.W_UW_MODE, 0x40))
+
+        probe.write_duty(1, 50)
+        self.assertEqual(probe.written[-1], (backend.W_UW_FANSPEED, 99))
+
+        with mock.patch("fcntl.ioctl") as mock_ioctl:
+            probe.release()
+            mock_ioctl.assert_called_once_with(42, backend.W_UW_FANAUTO)
+
     def test_clevo_backend_discovery_and_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
@@ -132,7 +208,8 @@ class BackendTests(unittest.TestCase):
 
     def test_detect_backend_arg_beats_env(self):
         fake = object()
-        with mock.patch.object(backend, "ClevoAcpiBackend", return_value=fake), \
+        with mock.patch.object(backend.ClevoAcpiBackend, "available", return_value=True), \
+                mock.patch.object(backend, "ClevoAcpiBackend", return_value=fake), \
                 mock.patch.dict(os.environ, {"FAN_CONTROL_BACKEND": "tuxedo_io"}):
             self.assertIs(backend.detect_backend("clevo_acpi"), fake)
 
