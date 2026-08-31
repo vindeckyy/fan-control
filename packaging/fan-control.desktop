@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Fan Control
+Comment=Unofficial local thermal control for Clevo/Tongfang systems
+Exec=pkexec /usr/local/bin/fan-gui
+Icon=fan-control
+Terminal=false
+Categories=System;HardwareSettings;Settings;
+Keywords=fan;thermal;clevo;tongfang;
+StartupNotify=true
+X-GNOME-UsesNotifications=true

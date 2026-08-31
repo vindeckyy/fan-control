@@ -1,11 +1,15 @@
 [Unit]
 Description=Fan control daemon
+# The native dashboard takes exclusive EC ownership while it is open.
+# Opening fan-gui stops this unit; closing it starts it again.
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/fan-daemon --interval 2 --fans 2
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=fan-control
 
 [Install]
 WantedBy=multi-user.target

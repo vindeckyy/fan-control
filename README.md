@@ -2,7 +2,7 @@
 
 # Clevo/Tongfang Fan Control
 
-**A safety-focused Linux fan-control daemon and local web dashboard for compatible Clevo/Tongfang systems.**
+**A safety-focused Linux fan-control daemon and native WebKitGTK workstation for compatible Clevo/Tongfang systems.**
 
 [![CI](https://github.com/vindeckyy/fan-control/actions/workflows/ci.yml/badge.svg)](https://github.com/vindeckyy/fan-control/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Linux-1793d1)](https://kernel.org/)
@@ -17,27 +17,24 @@
 > reseller, or any kernel-driver vendor. Use it at your own risk.
 
 Fan Control provides automatic temperature curves, direct manual control,
-live CPU/GPU telemetry, and a responsive local dashboard. It is deliberately
-small, dependency-free, and bound to localhost.
-
-## Dashboard
-
-![Live fan controls, CPU and GPU telemetry, and temperature history](docs/images/dashboard-controls.jpg)
-
-![Custom fan curve editor and thermal safety settings](docs/images/dashboard-curve.jpg)
+live CPU/GPU telemetry, dual-axis history graphs, and a native desktop
+window. The dashboard is a GTK4 + WebKitGTK 6 application; it does not
+open a browser and does not bind a TCP port.
 
 ## Features
 
+- Native desktop window (no localhost web server)
 - Silent, Balanced, Performance, custom-curve, manual, and firmware-auto modes
-- Independent or linked CPU/GPU fan targets
+- Independent or linked CPU/GPU fan curves and targets
+- Visual curve editor with named import/export
 - Critical-temperature override that bypasses the user noise cap
 - Curve hysteresis to prevent rapid speed hunting
 - Automatic handoff to firmware when temperature data becomes unavailable
-- Live hwmon sensors with an NVIDIA `nvidia-smi` fallback
-- Thirty-minute CPU temperature, GPU temperature, and fan-duty history
+- Live hwmon sensors with an NVIDIA `nvidia-smi` fallback and optional pinning
+- Thirty-minute CPU/GPU temperature and fan-duty history with CSV export
+- Read-only Clevo tach (RPM) when the backend exposes it; Uniwill tach is not probed
 - Persistent configuration with atomic writes
-- Responsive dark/light dashboard and optional browser alerts
-- Serialized EC access and clean daemon/dashboard ownership handoff
+- Dark/light themes, desktop notifications, display-only tray, `fan-ctl` CLI
 - Hardware-free demo mode for safe evaluation and UI development
 
 ## Compatibility
@@ -49,8 +46,8 @@ one is present; use `--backend` or `FAN_CONTROL_BACKEND` to override.
 | --- | --- |
 | Hardware | Clevo/Tongfang-based system with a compatible EC interface |
 | Backend | `tuxedo_io` (ioctls on a `/dev/*_io` device) or `clevo_acpi` (sysfs) |
-| clevo_acpi | Requires `clevo-acpi-dkms` with fan duty attributes |
-| Runtime | Python 3.10 or newer; standard library only |
+| Desktop | GTK 4 and WebKitGTK 6 (`gir1.2-gtk-4.0`, `gir1.2-webkit-6.0`, `python3-gi`) |
+| Runtime | Python 3.10 or newer |
 | Privileges | Root access for EC reads and writes |
 | Service manager | systemd for the included background service |
 | NVIDIA telemetry | Optional; requires a working `nvidia-smi` command |
@@ -59,11 +56,7 @@ The `tuxedo_io` backend drives duty through ioctls on a character device
 matching `/dev/*_io`. The `clevo_acpi` backend drives per-fan duty through
 plain sysfs files under `/sys/class/leds/clevo-acpi::kbd_backlight/device/`,
 and relies on that driver's kernel-side watchdog to return control to
-firmware auto if the controlling process stops. The sysfs interface comes
-from [clevo-acpi-dkms](https://github.com/arbitrary-string/clevo-acpi-dkms)
-(GPL-2.0-or-later); its semantics were verified against that driver and the
-[clevo-control-panel](https://github.com/arbitrary-string/clevo-control-panel)
-(GPL-3.0) reference daemon.
+firmware auto if the controlling process stops.
 
 Hardware compatibility varies by model and firmware. Start with demo mode,
 then verify sensor readings and fan response before enabling the service.
@@ -80,10 +73,15 @@ Fan Control treats thermal control as a safety-critical path:
 - After three invalid temperature readings, the daemon returns control to the
   system firmware until valid telemetry returns.
 - On the `clevo_acpi` backend, the kernel-side watchdog independently releases
-  to firmware auto if the controlling process stops renewing a manual override,
-  so a crashed or killed daemon cannot leave a fan stuck at a stale speed.
+  to firmware auto if the controlling process stops renewing a manual override.
 - The dashboard and daemon never intentionally own the EC interface at the
-  same time.
+  same time. Opening the window stops `fan-daemon`; closing it starts it again.
+- Safety-critical policy lives in Python (`fan_policy.py`), not in JavaScript.
+
+The dashboard process currently needs the same privileges as the daemon in
+order to own the EC. WebKit therefore may run as root. The UI is loaded from a
+custom `fancontrol://` origin with no network `connect-src`, which is why that
+privilege boundary matters.
 
 > [!CAUTION]
 > Confirm the reported temperatures and physical fan response on your exact
@@ -92,17 +90,21 @@ Fan Control treats thermal control as a safety-critical path:
 
 ## Installation
 
-Clone the repository and install the two executables, the backend module, and
-the service unit:
+Debian/Kali:
+
+```bash
+sudo apt install python3 python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0 nodejs npm
+```
+
+Fedora: `python3-gobject gtk4 webkitgtk6.0 nodejs`.
+Arch: `python-gobject gtk4 webkitgtk-6.0 nodejs npm`.
+
+Clone, build the UI, and install:
 
 ```bash
 git clone https://github.com/vindeckyy/fan-control.git
 cd fan-control
-
-sudo install -Dm755 fan-daemon.py /usr/local/bin/fan-daemon
-sudo install -Dm755 fan-gui.py /usr/local/bin/fan-gui
-sudo install -Dm644 fan_backend.py /usr/local/bin/fan_backend.py
-sudo install -Dm644 fan-daemon.service /etc/systemd/system/fan-daemon.service
+sudo make install
 sudo systemctl daemon-reload
 sudo systemctl enable --now fan-daemon
 ```
@@ -116,65 +118,92 @@ journalctl -u fan-daemon -n 50 --no-pager
 
 ## Usage
 
-Open the local dashboard:
+Open the native dashboard (EC access still needs root):
 
 ```bash
 sudo fan-gui
+# or
+pkexec fan-gui
 ```
 
-The dashboard listens only on `http://127.0.0.1:4444`. While it is open, it
-temporarily stops the daemon and takes ownership of the EC interface. Closing
-the dashboard releases control and restarts the daemon.
+While the window is open it stops `fan-daemon` and takes exclusive EC ownership.
+Closing the window releases the EC and restarts the daemon.
 
-Run the daemon directly with a built-in profile:
+Preview without root or compatible hardware:
+
+```bash
+cd ui && npm ci && npm run build && cd ..
+FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo
+```
+
+Headless snapshot for CI and scripts:
+
+```bash
+FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo --headless-smoke
+```
+
+Display-only tray (never locks the EC; profile changes SIGHUP the daemon):
+
+```bash
+fan-gui --tray
+```
+
+CLI:
+
+```bash
+fan-ctl status --json
+sudo fan-ctl profile silent
+sudo fan-ctl mode released
+sudo fan-ctl set 1 40
+fan-ctl curve
+sudo fan-ctl diagnose
+```
+
+`fan-ctl` refuses exclusive changes while the dashboard lock is held.
+
+Run the daemon directly:
 
 ```bash
 sudo fan-daemon --profile balanced
-```
-
-Preview the complete dashboard without root or compatible hardware:
-
-```bash
-FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json fan-gui --demo
-```
-
-Preview daemon decisions without opening an EC device:
-
-```bash
 fan-daemon --dry-run --profile silent
+sudo fan-daemon --diagnose
 ```
 
 ## Configuration
 
 Both programs read `/etc/fan-control.json`. The dashboard writes this file
-atomically when settings change.
+atomically when settings change. The daemon reloads it on `SIGHUP` /
+`systemctl reload fan-daemon`.
 
 ```json
 {
   "profile": "balanced",
+  "mode": "curve",
   "max_duty": 100,
   "hysteresis": 5,
-  "critical_temp": 95
+  "critical_temp": 95,
+  "linked": true
 }
 ```
 
 | Key | Default | Purpose |
 | --- | ---: | --- |
 | `profile` | `balanced` | Active automatic curve |
-| `curve` | built-in | Custom `[temperature, duty]` points |
+| `mode` | `manual` | `manual`, `curve`, or `released` |
+| `curve` | built-in | Shared `[temperature, duty]` points |
+| `curve_cpu` / `curve_gpu` | none | Independent curves when `linked` is false |
 | `max_duty` | `100` | Normal-operation noise cap, as a percentage |
 | `hysteresis` | `5` | Minimum duty change before curve updates |
 | `critical_temp` | `95` | Temperature that forces maximum safe duty |
+| `linked` | `true` | Drive both fans from the same curve/target |
+| `named_curves` | `{}` | Saved custom curves |
+| `cpu_sensor` / `gpu_sensor` | hottest defaults | Pinned hwmon identity `{name, label}` |
+| `theme` | `dark` | `dark` or `light` |
+| `alerts.desktop` | `false` | Gio notifications at critical temperature |
 
-Backend selection is automatic: clevo-acpi sysfs is preferred when its fan
-attributes exist, otherwise `tuxedo_io` on the sole `/dev/*_io` device. Set
-`FAN_CONTROL_BACKEND` or pass `--backend` to override. For `tuxedo_io`, set
-`FAN_CONTROL_DEVICE` or pass `--device` when multiple candidates exist:
-
-```bash
-sudo FAN_CONTROL_BACKEND=clevo_acpi fan-gui
-sudo FAN_CONTROL_DEVICE=/dev/example_io fan-gui
-```
+Backend selection is automatic. Set `FAN_CONTROL_BACKEND` or pass `--backend`
+to override. For `tuxedo_io`, set `FAN_CONTROL_DEVICE` or pass `--device`
+when multiple candidates exist.
 
 ## Architecture
 
@@ -192,49 +221,31 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
        firmware auto ◄── ownership handoff ◄── watchdog / release
 ```
 
-- `fan_backend.py` defines the backend abstraction and three implementations.
-- `fan-daemon.py` owns automatic background control.
-- `fan-gui.py` serves the local dashboard and interactive control API.
-- `fan-daemon.service` starts the daemon at boot.
-- `test_fan_control.py` covers interpolation, safety bounds, curve validation,
-  backend discovery, duty conversion, legacy config migration, dashboard
-  contracts, and NVIDIA parsing.
+- `fan_backend.py` — hardware backends.
+- `fan_policy.py` — shared curves, interpolation, critical override, config.
+- `fan_controller.py` — JSON-RPC methods used by the native UI.
+- `fan_gtk.py` — GTK4 + WebKitGTK 6 window and display-only tray.
+- `fan-gui.py` — entry point (`--demo`, `--tray`, `--headless-smoke`).
+- `fan-daemon.py` — systemd background control; reloads on SIGHUP.
+- `fan-ctl.py` — CLI that edits config and signals the daemon.
+- `ui/` — React + Vite dashboard loaded from `fancontrol://app/`.
 
 ## Troubleshooting
 
 ### No fan-control hardware found
 
-Run the built-in diagnostic to see which backend is available:
-
 ```bash
 sudo fan-daemon --diagnose
-```
-
-For `tuxedo_io`, confirm a character device exists:
-
-```bash
-ls -l /dev/*_io
-```
-
-For `clevo_acpi`, confirm the fan attributes exist:
-
-```bash
-ls /sys/class/leds/clevo-acpi::kbd_backlight/device/fan*_manual_duty
+sudo fan-ctl diagnose
 ```
 
 ### Dashboard does not open
 
-Check whether another process is using port `4444`, then run the dashboard in
-a terminal to retain the error message:
-
-```bash
-ss -ltnp 'sport = :4444'
-sudo fan-gui --no-browser
-```
+Install GI bindings (`gir1.2-gtk-4.0`, `gir1.2-webkit-6.0`) and build the UI
+(`cd ui && npm ci && npm run build`). Run `python3 fan-gui.py --demo --debug`
+to enable the WebKit inspector.
 
 ### NVIDIA temperature is missing
-
-Verify that the driver can report temperature:
 
 ```bash
 nvidia-smi --query-gpu=index,temperature.gpu,name --format=csv,noheader,nounits
@@ -242,11 +253,11 @@ nvidia-smi --query-gpu=index,temperature.gpu,name --format=csv,noheader,nounits
 
 ## Development
 
-The project intentionally uses only the Python standard library.
-
 ```bash
-python3 -m py_compile fan_backend.py fan-daemon.py fan-gui.py test_fan_control.py
+python3 -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan-daemon.py fan-gui.py fan-ctl.py test_fan_control.py
 python3 -m unittest -v
+cd ui && npm ci && npm test && npm run build
+FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing hardware-facing

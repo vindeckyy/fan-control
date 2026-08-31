@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.community.FanControl</id>
+  <name>Fan Control</name>
+  <summary>Unofficial Clevo/Tongfang fan control</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      A safety-focused Linux fan-control daemon and native WebKitGTK dashboard
+      for compatible Clevo/Tongfang systems. This is an unofficial community
+      project and is not affiliated with Clevo or Tongfang.
+    </p>
+  </description>
+  <launchable type="desktop-id">fan-control.desktop</launchable>
+  <categories>
+    <category>System</category>
+    <category>HardwareSettings</category>
+  </categories>
+</component>

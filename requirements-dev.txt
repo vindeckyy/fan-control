@@ -1,0 +1,2 @@
+# Optional development extras (mypy, etc). Runtime uses distro GI packages.
+mypy>=1.8

@@ -2,26 +2,35 @@
 """Temperature-driven fan control for Clevo/Tongfang barebones."""
 
 import argparse
-import json
-
+import os
 import pathlib
 import signal
 import subprocess
 import sys
 import time
-from fan_backend import (
-    MAX_DUTY_PERCENT,
-    detect_backend,
-    migrate_config,
+
+_ROOT = pathlib.Path(__file__).resolve().parent
+for _candidate in (_ROOT, pathlib.Path("/usr/local/lib/fan-control"), pathlib.Path("/usr/lib/fan-control")):
+    if (_candidate / "fan_backend.py").is_file() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
+from fan_backend import detect_backend
+from fan_policy import (
+    PROFILES,
+    SAFE_MAX_DUTY,
+    decide,
+    interpolate,
+    load_config,
+    normalize_curve,
+    parse_nvidia_temperatures,
+    pick_cpu_temp,
+    pick_gpu_temp,
+    select_control_temp,
+    target_duty,
 )
+from fan_runtime import ExclusiveLock, gui_lock_held, runtime_dir, write_daemon_pid, clear_pid
 
-SAFE_MAX_DUTY = MAX_DUTY_PERCENT
-
-PROFILES = {
-    "silent": [(0, 0), (50, 0), (60, 0), (70, 30), (80, 61), (90, 86), (95, 100), (110, 100)],
-    "balanced": [(0, 0), (50, 0), (60, 25), (70, 50), (80, 76), (90, 91), (95, 100), (110, 100)],
-    "performance": [(0, 0), (50, 0), (60, 40), (70, 71), (80, 91), (85, 100), (110, 100)],
-}
+CONFIG_DEFAULT = os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json")
 
 
 def find_cpu_sensor():
@@ -68,18 +77,6 @@ def cpu_temp(sensor):
         return None
 
 
-def parse_nvidia_temperatures(output):
-    temperatures = []
-    for line in output.splitlines():
-        try:
-            temperature = float(line.strip())
-        except ValueError:
-            continue
-        if 0 < temperature <= 150:
-            temperatures.append(temperature)
-    return temperatures
-
-
 def gpu_temp():
     try:
         result = subprocess.run(
@@ -95,65 +92,62 @@ def gpu_temp():
     return max(temperatures) if temperatures else None
 
 
-def normalize_curve(curve):
-    """Validate, sort, deduplicate, and clamp a user-provided curve."""
-    if not isinstance(curve, list):
-        raise ValueError("curve must be a JSON list")
-    points = {}
-    for row in curve:
-        if not isinstance(row, (list, tuple)) or len(row) != 2:
-            raise ValueError("each curve point must be [temperature, duty]")
-        temp, duty = row
-        if isinstance(temp, bool) or isinstance(duty, bool) or not isinstance(temp, (int, float)) or not isinstance(duty, (int, float)):
-            raise ValueError("curve values must be numbers")
-        points[max(0, min(150, float(temp)))] = max(0, min(SAFE_MAX_DUTY, int(round(duty))))
-    curve = sorted(points.items())
-    if len(curve) < 2:
-        raise ValueError("curve needs at least two unique temperatures")
-    return curve
-
-
-def interpolate(temp, curve):
-    if temp <= curve[0][0]:
-        return curve[0][1]
-    if temp >= curve[-1][0]:
-        return curve[-1][1]
-    for (t0, d0), (t1, d1) in zip(curve, curve[1:]):
-        if t0 <= temp < t1:
-            return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
-    raise ValueError("invalid fan curve")
-
-
-def target_duty(temp, curve, max_duty=SAFE_MAX_DUTY, critical_temp=95):
-    """Critical cooling deliberately bypasses the user noise cap."""
-    if temp >= critical_temp:
-        return SAFE_MAX_DUTY
-    return max(0, min(max_duty, int(round(interpolate(temp, curve)))))
-
-
-def load_config(path):
-    if not path:
-        return {}
-    try:
-        value = json.loads(pathlib.Path(path).read_text())
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot read config: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("config must contain a JSON object")
-    return migrate_config(value)
+def _scan_hwmon():
+    found = []
+    for hwmon in sorted(pathlib.Path("/sys/class/hwmon").glob("hwmon*")):
+        try:
+            name = (hwmon / "name").read_text().strip()
+        except OSError:
+            continue
+        for path in sorted(hwmon.glob("temp*_input")):
+            try:
+                temp = int(path.read_text().strip()) / 1000
+                if 0 <= temp <= 150:
+                    label_path = path.with_name(path.name.replace("_input", "_label"))
+                    label = label_path.read_text().strip() if label_path.exists() else path.stem.replace("_input", "")
+                    found.append({"name": name, "label": label, "temp": temp})
+            except (OSError, ValueError):
+                continue
+    return found
 
 
 def run(args):
-    config = load_config(args.config)
-    profile = config.get("profile", args.profile)
-    if profile not in (*PROFILES, "custom"):
-        profile = args.profile
-    curve = normalize_curve(args.curve or (config.get("curve") if profile == "custom" else None) or PROFILES.get(profile, PROFILES[args.profile]))
-    max_duty = max(0, min(SAFE_MAX_DUTY, int(config.get("max_duty", args.max_duty))))
-    hysteresis = max(0, int(config.get("hysteresis", args.hysteresis)))
-    critical_temp = max(70, min(110, float(config.get("critical_temp", args.critical_temp))))
+    rdir = runtime_dir(demo=False, override=args.runtime_dir)
+    if gui_lock_held(rdir):
+        sys.exit("GUI has exclusive control; not starting the daemon")
+    lock = ExclusiveLock(rdir / "ec.lock")
+    if not args.dry_run and not lock.acquire():
+        sys.exit("could not acquire exclusive EC lock")
+    write_daemon_pid(rdir)
+
+    hold = {"reload": False}
+
+    def request_reload(*_):
+        hold["reload"] = True
+
+    def load_hold():
+        config = load_config(args.config)
+        profile = config.get("profile", args.profile)
+        if profile not in PROFILES:
+            profile = args.profile
+        curve = config["curve"] if profile == "custom" else list(PROFILES.get(profile, PROFILES[args.profile]))
+        if args.curve:
+            curve = normalize_curve(args.curve)
+        hold.update({
+            "profile": profile,
+            "curve": curve,
+            "curve_cpu": config.get("curve_cpu"),
+            "curve_gpu": config.get("curve_gpu"),
+            "linked": config.get("linked", True),
+            "mode": config.get("mode", "curve") if config.get("mode") in ("curve", "released") else "curve",
+            "max_duty": config.get("max_duty", args.max_duty),
+            "hysteresis": config.get("hysteresis", args.hysteresis),
+            "critical_temp": config.get("critical_temp", args.critical_temp),
+            "cpu_sensor": config.get("cpu_sensor"),
+            "gpu_sensor": config.get("gpu_sensor"),
+        })
+
+    load_hold()
     sensor = find_cpu_sensor()
     backend = None if args.dry_run else detect_backend(args.backend, args.device)
     stopped = False
@@ -164,48 +158,99 @@ def run(args):
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGHUP, request_reload)
     if backend:
-        backend.lock()
-    print(f"fan daemon: profile={profile}, backend={backend.name if backend else 'dry-run'}, {len(curve)} points, interval={args.interval}s, cap={max_duty}")
+        if hold["mode"] == "released":
+            backend.release()
+        else:
+            backend.lock()
+    print(
+        f"fan daemon: profile={hold['profile']}, backend={backend.name if backend else 'dry-run'}, "
+        f"{len(hold['curve'])} points, interval={args.interval}s, cap={hold['max_duty']}"
+    )
 
     missing = 0
     released_for_fault = False
     try:
         while not stopped:
-            cpu = cpu_temp(sensor)
+            if hold["reload"]:
+                hold["reload"] = False
+                try:
+                    load_hold()
+                    print(f"fan daemon: reloaded profile={hold['profile']} mode={hold['mode']}")
+                    if backend:
+                        if hold["mode"] == "released":
+                            backend.release()
+                        else:
+                            backend.lock()
+                except (OSError, ValueError) as exc:
+                    print(f"reload failed: {exc}", file=sys.stderr)
+            sensors = _scan_hwmon()
+            cpu = pick_cpu_temp(sensors, hold.get("cpu_sensor"), cpu_temp(sensor))
             if cpu is None and backend:
                 try:
                     cpu = backend.read_temp()
                 except OSError:
                     cpu = None
-            temperatures = [value for value in (cpu, gpu_temp()) if value is not None and 0 < value <= 150]
-            if not temperatures:
+            gpu = pick_gpu_temp(sensors, hold.get("gpu_sensor"))
+            if gpu is None:
+                gpu = gpu_temp()
+            if backend:
+                fans = tuple(fan for fan in backend.fans() if fan <= args.fans or fan <= 3)
+                current = {}
+                for fan in fans:
+                    try:
+                        current[fan] = backend.read_duty(fan)
+                    except OSError:
+                        current[fan] = 0
+            else:
+                fans = (1, 2)[: args.fans]
+                current = {fan: 0 for fan in fans}
+
+            decision = decide(
+                mode=hold["mode"] if hold["mode"] in ("curve", "released") else "curve",
+                profile=hold["profile"],
+                cpu_temp=cpu,
+                gpu_temp=gpu,
+                targets={1: 0, 2: 0, 3: 0},
+                max_duty=hold["max_duty"],
+                hysteresis=hold["hysteresis"],
+                critical_temp=hold["critical_temp"],
+                linked=hold["linked"],
+                shared_curve=hold["curve"] if hold["profile"] == "custom" else list(PROFILES.get(hold["profile"], hold["curve"])),
+                curve_cpu=hold["curve_cpu"],
+                curve_gpu=hold["curve_gpu"],
+                current_duties=current,
+                missing_count=missing,
+                fans=fans,
+            )
+            if decision.missing_temp:
                 missing += 1
-                if backend and missing >= 3 and not released_for_fault:
+            else:
+                missing = 0
+            if decision.action == "release":
+                if backend and not released_for_fault:
                     print("temperature unavailable; returning control to the EC", file=sys.stderr)
                     backend.release()
                     released_for_fault = True
                 time.sleep(args.interval)
                 continue
-
-            temp = max(temperatures)
-            if released_for_fault and backend:
+            if released_for_fault and backend and decision.action == "write":
                 backend.lock()
                 released_for_fault = False
-            missing = 0
-            duty = target_duty(temp, curve, max_duty, critical_temp)
             if args.dry_run:
-                print(f"{temp:.1f}°C -> duty {duty}")
-            else:
-                wrote = False
-                for fan in backend.fans():
-                    if fan > args.fans:
-                        break
-                    if temp >= critical_temp or abs(backend.read_duty(fan) - duty) >= hysteresis:
+                control = select_control_temp(cpu, gpu)
+                print(f"{control if control is not None else '--'}°C -> {decision.duties or decision.writes}")
+            elif backend:
+                if hold["mode"] == "released":
+                    backend.ping()
+                else:
+                    wrote = False
+                    for fan, duty in decision.writes.items():
                         backend.write_duty(fan, duty)
                         wrote = True
-                if not wrote:
-                    backend.ping()
+                    if not wrote:
+                        backend.ping()
             time.sleep(args.interval)
     finally:
         if backend:
@@ -214,23 +259,29 @@ def run(args):
             except OSError:
                 pass
             backend.close()
+        lock.release()
+        clear_pid(rdir, "daemon.pid")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=2.0)
-    parser.add_argument("--profile", choices=PROFILES, default="balanced")
-    parser.add_argument("--curve", type=json.loads, help="JSON list of [temperature, duty] points")
-    parser.add_argument("--config", default="/etc/fan-control.json")
+    parser.add_argument("--profile", choices=[name for name in PROFILES if name != "custom"], default="balanced")
+    parser.add_argument("--curve", help="JSON list of [temperature, duty] points")
+    parser.add_argument("--config", default=CONFIG_DEFAULT)
     parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
     parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
-    parser.add_argument("--fans", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--fans", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--hysteresis", type=int, default=5)
     parser.add_argument("--max-duty", type=int, default=SAFE_MAX_DUTY)
     parser.add_argument("--critical-temp", type=float, default=95)
     parser.add_argument("--dry-run", action="store_true", help="print decisions without opening the EC device")
     parser.add_argument("--diagnose", action="store_true", help="print system state and exit (no EC access)")
+    parser.add_argument("--runtime-dir", help="override /run/fan-control")
     args = parser.parse_args()
+    if args.curve:
+        import json
+        args.curve = json.loads(args.curve)
     if args.diagnose:
         diagnose(args.config)
         return

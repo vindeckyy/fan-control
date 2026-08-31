@@ -124,6 +124,10 @@ class FanBackend:
         """Secondary EC temperature in degrees C, or ``None``."""
         return None
 
+    def read_rpm(self, fan):
+        """Read-only tach in RPM, or ``None`` if this backend/model has none."""
+        return None
+
     def ping(self):
         """Keep the watchdog alive without an EC write. No-op if absent."""
 
@@ -248,6 +252,18 @@ class TuxedoIoBackend(FanBackend):
         except OSError:
             return None
 
+    def read_rpm(self, fan):
+        # Uniwill tach is unverified; never probe those registers.
+        if not getattr(self, "is_clevo", False):
+            return None
+        try:
+            with self._lock:
+                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1] if fan in (1, 2, 3) else R_CL_FANINFO1
+                rpm = (self._read(cmd) >> 16) & 0xFFFF
+                return int(rpm) if 0 < rpm < 30000 else None
+        except OSError:
+            return None
+
     def close(self):
         if self.fd is not None:
             os.close(self.fd)
@@ -318,6 +334,16 @@ class ClevoAcpiBackend(FanBackend):
         except (OSError, ValueError):
             return None
 
+    def read_rpm(self, fan):
+        path = self.base / f"fan{fan}_rpm"
+        if not path.exists():
+            return None
+        try:
+            rpm = int(path.read_text().strip())
+            return rpm if 0 < rpm < 30000 else None
+        except (OSError, ValueError):
+            return None
+
     def ping(self):
         try:
             self._write("fan_watchdog_ping", "1")
@@ -351,6 +377,12 @@ class DemoBackend(FanBackend):
 
     def read_temp2(self):
         return self.read_temp() + 2
+
+    def read_rpm(self, fan):
+        duty = self._duty.get(fan, 0)
+        if duty <= 0:
+            return 0
+        return 800 + int(duty * 18)
 
 
 def _find_ec_device():

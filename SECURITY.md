@@ -20,9 +20,18 @@ allow time for a fix before publishing technical details.
 
 ## Scope
 
-Security-relevant areas include the localhost HTTP API, privileged process
-boundaries, configuration handling, EC read/write validation, firmware
-handoff, and browser-origin protections.
+Security-relevant areas include:
+
+- the WebKitGTK JSON-RPC bridge (`script-message-with-reply-received`);
+- the custom `fancontrol://` origin and Content-Security-Policy;
+- privileged process boundaries (the dashboard may run as root while it owns the EC);
+- configuration handling;
+- EC read/write validation;
+- firmware handoff;
+- exclusive lock files under `/run/fan-control`.
+
+There is no HTTP API and no TCP listener. The previous localhost dashboard
+on port 4444 has been removed.
 
 This is an unofficial community project without a guaranteed response SLA.
 Manufacturer support channels cannot provide support for this software.

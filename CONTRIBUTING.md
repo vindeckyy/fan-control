@@ -15,11 +15,10 @@ reproduce. Remove serial numbers and other personal information from logs.
 
 ## Development checks
 
-The project has no third-party runtime or test dependencies:
-
 ```bash
-python3 -m py_compile fan-daemon.py fan-gui.py test_fan_control.py
+python3 -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan-daemon.py fan-gui.py fan-ctl.py test_fan_control.py
 python3 -m unittest -v
+cd ui && npm ci && npm test && npm run build
 ```
 
 For dashboard changes, also run:
@@ -28,8 +27,10 @@ For dashboard changes, also run:
 FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo
 ```
 
-Verify both desktop and narrow-screen layouts, manual control, automatic
-profiles, custom curves, EC-auto release, and light/dark themes.
+Verify both desktop and ~900px tiled layouts, manual control, automatic
+profiles, custom curves, EC-auto release, light/dark themes, history windows,
+and the visual curve editor. `--headless-smoke` covers the controller without
+opening a window.
 
 ## Hardware-facing changes
 

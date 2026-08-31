@@ -2,35 +2,34 @@
 
 ## Shipped
 
+- Native GTK4 + WebKitGTK 6 dashboard (no browser, no TCP port)
+- Shared `fan_policy.py` used by daemon, GUI, and CLI
 - Manual, Silent, Balanced, Performance, custom-curve, and EC-auto modes
-- Linked or independent fan targets with accurate cap-relative percentages
-- Validated, sorted, deduplicated custom fan curves
+- Linked or independent fan targets and per-side custom curves
+- Visual curve editor, named curves, GTK import/export
+- Dual-axis history graphs, sparklines, CSV export
+- Sensor pinning and optional fan 3 when the backend lists it
+- Read-only Clevo RPM from tuxedo_io FANINFO; Uniwill tach is not probed
 - Curve hysteresis and a cap-independent critical-temperature override
 - Automatic firmware handoff when temperature data becomes unavailable
-- Serialized EC access and clean daemon/dashboard ownership handoff
-- A second `clevo_acpi` sysfs backend for boards where `tuxedo_io` refuses to
-  bind, with the driver's kernel-side watchdog for crash safety. The sysfs
-  interface comes from
-  [clevo-acpi-dkms](https://github.com/arbitrary-string/clevo-acpi-dkms)
-  (GPL-2.0-or-later), verified against the
-  [clevo-control-panel](https://github.com/arbitrary-string/clevo-control-panel)
-  (GPL-3.0) reference daemon.
+- Exclusive EC lock + GUI pid so a crashed window does not block the daemon forever
+- Daemon SIGHUP reload and `fan-ctl`
+- Display-only tray and Gio desktop notifications
 - Persistent configuration shared through `/etc/fan-control.json`
 - Live hwmon sensors plus NVIDIA temperature fallback through `nvidia-smi`
+- A second `clevo_acpi` sysfs backend for boards where `tuxedo_io` refuses to bind
 
 ## Next
 
-- Fan RPM once a verified read-only tach source exists for this hardware
-- Optional per-GPU fan curves where the EC exposes independent control safely
-- Import/export for named custom curves
-- Packaging for common Linux distributions
+- Packaging for common Linux distributions (AUR, Debian, Fedora copr)
+- Polkit helper so the WebKit window does not need to run as root
+- Verified Uniwill tach only after a read-only register is confirmed per model
 
 ## Later
 
-- System tray status and quick profile switching
-- Small `fan-ctl` command-line client
-- Optional desktop notifications outside the browser
+- Optional per-GPU fan curves beyond CPU/GPU/Aux where a third EC channel is safe
+- Broader desktop-environment tray coverage (GNOME extension, Ayatana)
 
-RPM remains intentionally unimplemented: the known Uniwill value on the target
+RPM remains unimplemented on Uniwill: the known value on the target
 GWTN156-2BK is duty, not tach speed, and probing unknown EC registers risks
-hardware state. It should only be added after a read-only register is verified.
+hardware state.
