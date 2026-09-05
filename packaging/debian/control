@@ -20,8 +20,7 @@ Depends: ${misc:Depends},
          python3 (>= 3.10),
          python3-gi,
          systemd
-Recommends: polkit
-Suggests: nvidia-smi, tuxedo-drivers-dkms
+Suggests: nvidia-smi, polkit, tuxedo-drivers-dkms
 Description: Safety-focused Linux fan-control daemon and native WebKitGTK workstation
  Fan Control provides automatic temperature curves, direct manual control,
  live CPU/GPU telemetry, dual-axis history graphs, and a native desktop
