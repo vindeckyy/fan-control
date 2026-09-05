@@ -32,6 +32,8 @@ daemon = load("fan_daemon", "fan-daemon.py")
 backend = load("fan_backend", "fan_backend.py")
 rpc = load("fan_rpc", "fan_rpc.py")
 
+has_gi = importlib.util.find_spec("gi") is not None
+
 
 class FanLogicTests(unittest.TestCase):
     def test_interpolation_and_bounds(self):
@@ -1172,7 +1174,7 @@ class DaemonInProcessTests(unittest.TestCase):
                  mock.patch("time.sleep", side_effect=fake_sleep):
                 daemon.run(args)
 
-
+@unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
 class GtkLogicTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1186,7 +1188,7 @@ class GtkLogicTests(unittest.TestCase):
         self.server.start()
         self.client = rpc.RpcClient(self.sock_path)
         self.client.connect()
-        self.gtk_mod = load("fan_gtk", "fan_gtk.py")
+        self.gtk_mod = load("fan_gtk", "fan_gtk.py") if has_gi else None
 
     def tearDown(self):
         self.client.close()
@@ -1283,7 +1285,7 @@ class DeepCoverageTests(unittest.TestCase):
         self.server.start()
         self.client = rpc.RpcClient(self.sock_path)
         self.client.connect()
-        self.gtk_mod = load("fan_gtk", "fan_gtk.py")
+        self.gtk_mod = load("fan_gtk", "fan_gtk.py") if has_gi else None
 
     def tearDown(self):
         self.client.close()
@@ -1291,6 +1293,7 @@ class DeepCoverageTests(unittest.TestCase):
         self.controller.close()
         self.tmp.cleanup()
 
+    @unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
     def test_gtk_push_and_message_coverage(self):
         args = argparse.Namespace(demo=True, config=str(self.cfg_path), runtime_dir=str(self.rdir), debug=False)
         app = self.gtk_mod.FanApplication(args)
@@ -1343,6 +1346,7 @@ class DeepCoverageTests(unittest.TestCase):
 
         app._teardown()
 
+    @unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
     def test_gtk_real_mode_connection_retry_and_failure(self):
         args = argparse.Namespace(demo=False, config=str(self.cfg_path), runtime_dir="/tmp/nonexistent-rpc-test", debug=False)
         app = self.gtk_mod.FanApplication(args)
@@ -1395,6 +1399,7 @@ class DeepCoverageTests(unittest.TestCase):
             ctl.main()
         self.assertIn("daemon_reachable", out.getvalue())
 
+    @unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
     def test_gtk_serve_bytes_and_ui(self):
         args = argparse.Namespace(demo=True, config=str(self.cfg_path), runtime_dir=str(self.rdir), debug=False)
         app = self.gtk_mod.FanApplication(args)
@@ -1409,6 +1414,7 @@ class DeepCoverageTests(unittest.TestCase):
         app._serve_ui(req_bad)
         req_bad.finish_error.assert_called_once()
 
+    @unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
     def test_gtk_eval_event_and_push_history_append(self):
         args = argparse.Namespace(demo=True, config=str(self.cfg_path), runtime_dir=str(self.rdir), debug=False)
         app = self.gtk_mod.FanApplication(args)
@@ -1555,7 +1561,7 @@ class PerFile95GateTests(unittest.TestCase):
         self.server.start()
         self.client = rpc.RpcClient(self.sock_path)
         self.client.connect()
-        self.gtk_mod = load("fan_gtk", "fan_gtk.py")
+        self.gtk_mod = load("fan_gtk", "fan_gtk.py") if has_gi else None
 
     def tearDown(self):
         self.client.close()
@@ -1738,6 +1744,7 @@ class PerFile95GateTests(unittest.TestCase):
         with self.assertRaises(rpc._FrameTooLarge):
             rpc._read_line(mock_sock, limit=3)
 
+    @unittest.skipUnless(has_gi, "PyGObject (gi) not installed")
     def test_gtk_branches(self):
         args = argparse.Namespace(demo=True, config=str(self.cfg_path), runtime_dir=str(self.rdir), debug=True)
         app = self.gtk_mod.FanApplication(args)
