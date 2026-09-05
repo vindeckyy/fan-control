@@ -70,14 +70,6 @@ W_UW_FANSPEED2 = ioc(IOC_W, MAGIC_WRITE_UW, 0x11, SZ)
 W_UW_MODE = ioc(IOC_W, MAGIC_WRITE_UW, 0x12, SZ)
 W_UW_FANAUTO = ioc(IOC_NONE, MAGIC_WRITE_UW, 0x14, 0)
 
-# Backwards compatibility aliases
-MAGIC_RD, MAGIC_WR = MAGIC_READ_UW, MAGIC_WRITE_UW
-R_FS1, R_FS2 = R_UW_FANSPEED, R_UW_FANSPEED2
-R_TEMP, R_TEMP2 = R_UW_FAN_TEMP, R_UW_FAN_TEMP2
-W_FS1, W_FS2 = W_UW_FANSPEED, W_UW_FANSPEED2
-W_MODE = W_UW_MODE
-W_AUTO = W_UW_FANAUTO
-
 # The clevo-acpi fan attributes live on the platform device reached through
 # the LED classdev symlink. This is how the reference project resolves it.
 CLEVO_SYSFS_BASE = pathlib.Path("/sys/class/leds/clevo-acpi::kbd_backlight/device")
@@ -86,10 +78,13 @@ CLEVO_WATCHDOG_MIN_MS = 5000
 CLEVO_WATCHDOG_MAX_MS = 60000
 
 TUXEDO_NATIVE_MAX = 198
+CLEVO_HOLD_INTERVAL = 1.0
+UNIWILL_HOLD_INTERVAL = 0.25
 
 
-class FanBackendError(RuntimeError):
+class FanBackendError(OSError, RuntimeError):
     pass
+
 
 
 class FanBackend:
@@ -144,6 +139,9 @@ class TuxedoIoBackend(FanBackend):
         self.fd = os.open(path, os.O_RDWR)
         self._lock = threading.RLock()
         self._duties = {1: 0, 2: 0, 3: 0}
+        self._last_hold = 0.0
+        self._hold_stop = threading.Event()
+        self._hold_thread = None
         self.is_clevo = self._detect_clevo()
 
     def _detect_clevo(self):
@@ -191,10 +189,16 @@ class TuxedoIoBackend(FanBackend):
 
     def lock(self):
         with self._lock:
-            if not getattr(self, "is_clevo", False):
-                self._write(W_UW_MODE, 0x40)
+            if getattr(self, "is_clevo", False):
+                return
+            thread = getattr(self, "_hold_thread", None)
+            if thread is not None and thread.is_alive():
+                return
+            self._write(W_UW_MODE, 0x40)
+            self._start_hold_thread()
 
     def release(self):
+        self._stop_hold_thread()
         with self._lock:
             if getattr(self, "is_clevo", False):
                 self._write(W_CL_FANAUTO, 0)
@@ -206,25 +210,83 @@ class TuxedoIoBackend(FanBackend):
         with self._lock:
             self._duties[fan] = percent
             if getattr(self, "is_clevo", False):
-                raw1 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(1, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
-                raw2 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(2, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
-                raw3 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(3, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
-                arg = (raw1 & 0xFF) | ((raw2 & 0xFF) << 8) | ((raw3 & 0xFF) << 16)
-                self._write(W_CL_FANSPEED, arg)
+                self._commit_clevo_duties()
             else:
-                value = max(0, min(self.NATIVE_MAX, self._pct_to_raw(percent)))
-                cmd = (W_UW_FANSPEED, W_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else W_UW_FANSPEED
-                self._write(cmd, value)
+                self._commit_uniwill_duties()
+                self._start_hold_thread()
+
+    def _commit_clevo_duties(self):
+        raw1 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(1, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+        raw2 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(2, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+        raw3 = max(0, min(self.CLEVO_NATIVE_MAX, round(self._duties.get(3, 0) * self.CLEVO_NATIVE_MAX / MAX_DUTY_PERCENT)))
+        arg = (raw1 & 0xFF) | ((raw2 & 0xFF) << 8) | ((raw3 & 0xFF) << 16)
+        self._write(W_CL_FANSPEED, arg)
+        self._last_hold = time.monotonic()
+
+    def _commit_uniwill_duties(self):
+        for fan, cmd in ((1, W_UW_FANSPEED), (2, W_UW_FANSPEED2)):
+            percent = int(self._duties.get(fan, 0))
+            value = max(0, min(self.NATIVE_MAX, self._pct_to_raw(percent)))
+            self._write(cmd, value)
+        self._last_hold = time.monotonic()
+
+    def _start_hold_thread(self):
+        stop = getattr(self, "_hold_stop", None)
+        if stop is None or getattr(self, "is_clevo", False):
+            return
+        if self._hold_thread is not None and self._hold_thread.is_alive():
+            return
+        stop.clear()
+        self._hold_thread = threading.Thread(target=self._hold_loop, name="uniwill-fan-hold", daemon=True)
+        self._hold_thread.start()
+
+    def _stop_hold_thread(self):
+        stop = getattr(self, "_hold_stop", None)
+        thread = getattr(self, "_hold_thread", None)
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
+        self._hold_thread = None
+
+    def _hold_loop(self):
+        stop = self._hold_stop
+        while not stop.wait(UNIWILL_HOLD_INTERVAL):
+            try:
+                with self._lock:
+                    self._commit_uniwill_duties()
+            except (OSError, FanBackendError):
+                break
+
+    def ping(self):
+        with self._lock:
+            now = time.monotonic()
+            if getattr(self, "is_clevo", False):
+                if now - self._last_hold < CLEVO_HOLD_INTERVAL:
+                    return
+                self._commit_clevo_duties()
+                return
+            if now - getattr(self, "_last_hold", 0) < UNIWILL_HOLD_INTERVAL:
+                return
+            self._commit_uniwill_duties()
+            self._start_hold_thread()
 
     def read_duty(self, fan):
+        with self._lock:
+            # tuxedo_io readback registers are not a stable PWM echo on either
+            # Clevo (FANINFO low byte) or Uniwill (R_UW_FANSPEED*). Use the
+            # last duty we commanded so the control loop does not hunt.
+            return int(self._duties.get(fan, 0))
+
+    def read_duty_hardware(self, fan):
+        """Best-effort hardware readback; may be noisy or laggy on tuxedo_io."""
         with self._lock:
             if getattr(self, "is_clevo", False):
                 cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1] if fan in (1, 2, 3) else R_CL_FANINFO1
                 raw = self._read(cmd) & 0xFF
                 return round(raw * MAX_DUTY_PERCENT / self.CLEVO_NATIVE_MAX)
-            else:
-                cmd = (R_UW_FANSPEED, R_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else R_UW_FANSPEED
-                return self._raw_to_pct(self._read(cmd) & 0xFF)
+            cmd = (R_UW_FANSPEED, R_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else R_UW_FANSPEED
+            return self._raw_to_pct(self._read(cmd) & 0xFF)
 
     def read_temp(self):
         try:
@@ -265,6 +327,7 @@ class TuxedoIoBackend(FanBackend):
             return None
 
     def close(self):
+        self._stop_hold_thread()
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -446,19 +509,32 @@ def migrate_config(data):
         return data
     data = dict(data)
 
-    legacy = False
-    max_duty = data.get("max_duty")
-    if isinstance(max_duty, (int, float)) and not isinstance(max_duty, bool) and max_duty > MAX_DUTY_PERCENT:
-        legacy = True
-
-    curve = data.get("curve")
-    if isinstance(curve, list):
+    def _has_legacy_duty(curve):
+        if not isinstance(curve, list):
+            return False
         for row in curve:
             if (
                 isinstance(row, (list, tuple)) and len(row) == 2
                 and isinstance(row[1], (int, float)) and not isinstance(row[1], bool)
                 and row[1] > MAX_DUTY_PERCENT
             ):
+                return True
+        return False
+
+    legacy = False
+    max_duty = data.get("max_duty")
+    if isinstance(max_duty, (int, float)) and not isinstance(max_duty, bool) and max_duty > MAX_DUTY_PERCENT:
+        legacy = True
+
+    for key in ("curve", "curve_cpu", "curve_gpu"):
+        if _has_legacy_duty(data.get(key)):
+            legacy = True
+            break
+
+    named = data.get("named_curves")
+    if isinstance(named, dict):
+        for curve in named.values():
+            if _has_legacy_duty(curve):
                 legacy = True
                 break
 
@@ -468,10 +544,9 @@ def migrate_config(data):
     def scale(duty):
         return round(duty * MAX_DUTY_PERCENT / TUXEDO_NATIVE_MAX)
 
-    if isinstance(max_duty, (int, float)) and not isinstance(max_duty, bool):
-        data["max_duty"] = scale(max_duty)
-
-    if isinstance(curve, list):
+    def _migrate_curve(curve):
+        if not isinstance(curve, list):
+            return curve
         migrated = []
         for row in curve:
             if isinstance(row, (list, tuple)) and len(row) == 2:
@@ -481,6 +556,17 @@ def migrate_config(data):
                 migrated.append([temp, duty])
             else:
                 migrated.append(row)
-        data["curve"] = migrated
+        return migrated
+
+    if isinstance(max_duty, (int, float)) and not isinstance(max_duty, bool):
+        data["max_duty"] = scale(max_duty)
+
+    for key in ("curve", "curve_cpu", "curve_gpu"):
+        if key in data and isinstance(data[key], list):
+            data[key] = _migrate_curve(data[key])
+
+    if isinstance(named, dict):
+        data["named_curves"] = {k: _migrate_curve(v) for k, v in named.items()}
 
     return data
+

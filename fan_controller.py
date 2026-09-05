@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import collections
-import math
 import pathlib
-import subprocess
 import threading
 import time
 
+from fan_backend import FanBackendError
 from fan_policy import (
     PROFILES,
     SAFE_MAX_DUTY,
@@ -19,10 +18,10 @@ from fan_policy import (
     history_csv,
     load_config,
     normalize_curve,
-    parse_nvidia_smi,
     pick_cpu_temp,
     pick_gpu_temp,
     save_config,
+    scan_sensors,
     select_control_temp,
 )
 
@@ -34,11 +33,12 @@ def _int_targets(raw):
 
 
 class FanController:
-    def __init__(self, backend, config_path, runtime_dir, demo=False):
+    def __init__(self, backend, config_path, runtime_dir, demo=False, fan_limit=None):
         self.backend = backend
         self.config_path = pathlib.Path(config_path)
         self.runtime_dir = pathlib.Path(runtime_dir)
         self.demo = demo
+        self.fan_limit = fan_limit
         self.lock = threading.RLock()
         self.history = collections.deque(maxlen=HISTORY_LEN)
         self._sensors = []
@@ -71,14 +71,21 @@ class FanController:
                 self.backend.release()
             else:
                 self.backend.lock()
-        except OSError as exc:
+        except (OSError, FanBackendError) as exc:
             print(f"EC lock/release failed: {exc}", flush=True)
 
     def fans(self):
         try:
-            return list(self.backend.fans())
-        except OSError:
-            return [1, 2]
+            present = list(self.backend.fans())
+        except (OSError, FanBackendError):
+            present = [1, 2]
+        return [fan for fan in present if self.fan_limit is None or fan <= self.fan_limit]
+
+    def reload_config(self):
+        """SIGHUP path: re-read the config file and re-apply the EC mode."""
+        with self.lock:
+            self.state = apply_defaults(self._read_config())
+            self._apply_mode_to_backend()
 
     def cpu_temp(self):
         with self.lock:
@@ -118,12 +125,34 @@ class FanController:
             )
         return result
 
+    def live_snapshot(self):
+        with self.lock:
+            result = dict(self._readback)
+            result["targets"] = {str(k): int(v) for k, v in _int_targets(self.state["targets"]).items()}
+            result["temps"] = list(self._sensors)
+            result["primary_temp"] = self.cpu_temp()
+            result["gpu_temp"] = self.gpu_temp()
+            result["control_temp"] = self.control_temp()
+            result["mode"] = self.state["mode"]
+            result["profile"] = self.state["profile"]
+            result["linked"] = bool(self.state.get("linked"))
+            result["demo"] = self.demo
+            result["fault_missing"] = self._missing
+            result["critical_active"] = (
+                result["control_temp"] is not None
+                and result["control_temp"] >= self.state["critical_temp"]
+                and self.state["mode"] != "released"
+            )
+        return result
+
     def handle(self, method, params=None):
         params = params or {}
         if not isinstance(params, dict):
             raise ValueError("params must be an object")
         handler = {
             "snapshot": lambda: self.snapshot(),
+            "live": lambda: self.live_snapshot(),
+            "config.get": lambda: config_payload(self.state),
             "history": lambda: self._history(),
             "set": lambda: self._set(params),
             "profile": lambda: self._profile(params),
@@ -168,9 +197,9 @@ class FanController:
                     writes[other] = round(pct * cap / 100)
             else:
                 writes[fan] = round(pct * cap / 100)
-        self.backend.lock()
-        for target, duty in writes.items():
-            self.backend.write_duty(target, duty)
+            self.backend.lock()
+            for target, duty in writes.items():
+                self.backend.write_duty(target, duty)
         self._persist()
         return {"ok": True}
 
@@ -181,11 +210,12 @@ class FanController:
         with self.lock:
             self.state["profile"] = profile
             self.state["mode"] = "curve"
-            if profile != "custom":
-                self.state["curve"] = list(PROFILES[profile]) if profile == "custom" else self.state["curve"]
-            if profile == "custom" and not self.state["curve"]:
-                self.state["curve"] = list(PROFILES["custom"])
-        self.backend.lock()
+            if profile == "custom":
+                if not self.state["curve"]:
+                    self.state["curve"] = list(PROFILES["custom"])
+            else:
+                self.state["curve"] = list(PROFILES[profile])
+            self.backend.lock()
         self._persist()
         return {"ok": True}
 
@@ -195,10 +225,10 @@ class FanController:
             raise ValueError("unknown mode")
         with self.lock:
             self.state["mode"] = mode
-        if mode == "released":
-            self.backend.release()
-        else:
-            self.backend.lock()
+            if mode == "released":
+                self.backend.release()
+            else:
+                self.backend.lock()
         self._persist()
         return {"ok": True}
 
@@ -214,7 +244,7 @@ class FanController:
                 self.state["curve"] = curve
             self.state["profile"] = "custom"
             self.state["mode"] = "curve"
-        self.backend.lock()
+            self.backend.lock()
         self._persist()
         return {"ok": True}
 
@@ -282,47 +312,14 @@ class FanController:
             self.state["curve"] = list(self.state["named_curves"][name])
             self.state["profile"] = "custom"
             self.state["mode"] = "curve"
-        self.backend.lock()
+            self.backend.lock()
         self._persist()
         return {"ok": True}
 
     def tick_sensors(self):
-        if self.demo:
-            found = [
-                {"name": "k10temp", "label": "Tctl", "temp": 62 + 10 * math.sin(time.monotonic() / 18)},
-                {"name": "k10temp", "label": "Tccd1", "temp": 58 + 8 * math.sin(time.monotonic() / 21)},
-                {"name": "amdgpu", "label": "edge", "temp": 54 + 7 * math.sin(time.monotonic() / 23)},
-            ]
-        else:
-            found = []
-            for hwmon in sorted(pathlib.Path("/sys/class/hwmon").glob("hwmon*")):
-                try:
-                    name = (hwmon / "name").read_text().strip()
-                except OSError:
-                    continue
-                for path in sorted(hwmon.glob("temp*_input")):
-                    try:
-                        temp = int(path.read_text().strip()) / 1000
-                        if 0 <= temp <= 150:
-                            label_path = path.with_name(path.name.replace("_input", "_label"))
-                            label = label_path.read_text().strip() if label_path.exists() else path.stem.replace("_input", "")
-                            found.append({"name": name, "label": label, "temp": temp})
-                    except (OSError, ValueError):
-                        continue
-            if not any("nvidia" in sensor["name"].lower() for sensor in found):
-                found.extend(self._nvidia_sensors())
+        found = scan_sensors(demo=self.demo, include_nvidia=True)
         with self.lock:
             self._sensors = found
-
-    def _nvidia_sensors(self):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,temperature.gpu,name", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=2, check=False,
-            )
-            return parse_nvidia_smi(result.stdout) if result.returncode == 0 else []
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            return []
 
     def tick_readback(self):
         try:
@@ -340,7 +337,7 @@ class FanController:
             }
             with self.lock:
                 self._readback = snap
-        except OSError as exc:
+        except (OSError, FanBackendError) as exc:
             print(f"EC read failed: {exc}", flush=True)
 
     def tick_history(self):
@@ -399,47 +396,37 @@ class FanController:
         if decision.action == "release":
             try:
                 self.backend.release()
-            except OSError as exc:
+            except (OSError, FanBackendError) as exc:
                 print(f"EC release failed: {exc}", flush=True)
             with self.lock:
                 self._released_for_fault = True
                 self._missing = missing
             return decision
-        if self._released_for_fault:
-            try:
-                self.backend.lock()
-            except OSError as exc:
-                print(f"EC lock failed: {exc}", flush=True)
-            with self.lock:
+        with self.lock:
+            if self._released_for_fault:
+                try:
+                    self.backend.lock()
+                except (OSError, FanBackendError) as exc:
+                    print(f"EC lock failed: {exc}", flush=True)
                 self._released_for_fault = False
                 self._missing = 0
-        else:
-            with self.lock:
+            else:
                 self._missing = 0
-        for fan, duty in decision.writes.items():
-            try:
-                self.backend.write_duty(fan, duty)
-            except OSError as exc:
-                print(f"EC write failed: {exc}", flush=True)
-        if not decision.writes:
-            try:
-                self.backend.ping()
-            except OSError:
-                pass
+            for fan, duty in decision.writes.items():
+                try:
+                    self.backend.write_duty(fan, duty)
+                except (OSError, FanBackendError) as exc:
+                    print(f"EC write failed: {exc}", flush=True)
+            if not decision.writes:
+                try:
+                    self.backend.ping()
+                except (OSError, FanBackendError):
+                    pass
         return decision
 
     def diagnose_text(self):
-        import importlib.util
-        import io
-        from contextlib import redirect_stdout
-        path = pathlib.Path(__file__).resolve().parent / "fan-daemon.py"
-        spec = importlib.util.spec_from_file_location("fan_daemon_diagnose", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            mod.diagnose(str(self.config_path))
-        return buf.getvalue()
+        from fan_diagnostics import diagnose
+        return diagnose(self.config_path)
 
     def close(self):
         if self._closed:
@@ -447,9 +434,9 @@ class FanController:
         self._closed = True
         try:
             self.backend.release()
-        except OSError:
+        except (OSError, FanBackendError):
             pass
         try:
             self.backend.close()
-        except OSError:
+        except (OSError, FanBackendError):
             pass

@@ -17,20 +17,15 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("WebKit", "6.0")
 gi.require_version("JavaScriptCore", "6.0")
+gi.require_version("Soup", "3.0")
 
-from gi.repository import Gio, GLib, Gtk, JavaScriptCore as JSC, WebKit
+from gi.repository import Gio, GLib, Gtk, Soup, WebKit
+from gi.repository import JavaScriptCore as JSC
 
-from fan_backend import DemoBackend, detect_backend
+from fan_backend import DemoBackend
 from fan_controller import FanController
-from fan_policy import load_config, save_config
-from fan_runtime import (
-    ExclusiveLock,
-    clear_pid,
-    gui_lock_held,
-    runtime_dir,
-    signal_daemon,
-    write_gui_pid,
-)
+from fan_rpc import RpcClient, control_socket_path
+from fan_runtime import runtime_dir
 
 APP_ID = "org.community.FanControl"
 SCHEME = "fancontrol"
@@ -68,25 +63,33 @@ def ui_root():
     return here / "ui" / "dist"
 
 
-def stop_daemon():
-    subprocess.run(["systemctl", "stop", "fan-daemon"], capture_output=True)
-    for _ in range(50):
-        result = subprocess.run(["systemctl", "is-active", "fan-daemon"], capture_output=True, text=True)
-        if result.stdout.strip() != "active":
-            break
-        time.sleep(0.05)
+class _InProcessAdapter:
+    def __init__(self, controller):
+        self.controller = controller
+
+    def handle(self, method, params=None):
+        return self.controller.handle(method, params or {})
+
+    def close(self):
+        self.controller.close()
 
 
-def start_daemon():
-    subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True)
+class _RpcClientAdapter:
+    def __init__(self, client):
+        self.client = client
 
+    def handle(self, method, params=None):
+        return self.client.call(method, params or {})
+
+    def close(self):
+        self.client.close()
 
 class FanApplication(Gtk.Application):
     def __init__(self, args):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.args = args
         self.controller = None
-        self.lock = None
+        self._rpc = None
         self.webview = None
         self.window = None
         self.status_label = None
@@ -105,9 +108,8 @@ class FanApplication(Gtk.Application):
             return
         self._build_window()
         self._start_loops()
-        GLib.timeout_add(500, self._push_snapshot)
+        GLib.timeout_add(500, self._push_live)
         GLib.timeout_add(2000, self._push_history)
-        GLib.timeout_add(500, self._update_header)
         self.window.present()
 
     def _fatal_window(self, message):
@@ -126,26 +128,34 @@ class FanApplication(Gtk.Application):
     def _setup_controller(self):
         config_path = pathlib.Path(self.args.config)
         if self.args.demo:
-            backend = DemoBackend()
+            self.controller = FanController(
+                backend=DemoBackend(),
+                config_path=config_path,
+                runtime_dir=self.runtime,
+                demo=True,
+            )
+            self._rpc = _InProcessAdapter(self.controller)
         else:
-            stop_daemon()
-            self.lock = ExclusiveLock(self.runtime / "ec.lock")
-            if not self.lock.acquire():
-                raise RuntimeError("could not acquire exclusive EC lock")
-            write_gui_pid(self.runtime)
+            sock_path = control_socket_path(self.runtime)
+            client = RpcClient(sock_path)
             try:
-                backend = detect_backend(self.args.backend, self.args.device)
+                client.connect()
+            except ConnectionError:
+                subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True)
+                for _ in range(20):
+                    time.sleep(0.5)
+                    try:
+                        client.connect()
+                        break
+                    except (ConnectionError, FileNotFoundError):
+                        continue
+                else:
+                    raise RuntimeError(
+                        "fan-daemon is not running; start it with: systemctl start fan-daemon"
+                    )
             except PermissionError as exc:
-                raise RuntimeError("need root") from exc
-            except FileNotFoundError as exc:
                 raise RuntimeError(str(exc)) from exc
-        self.controller = FanController(
-            backend=backend,
-            config_path=config_path,
-            runtime_dir=self.runtime,
-            demo=self.args.demo,
-        )
-
+            self._rpc = _RpcClientAdapter(client)
     def _build_window(self):
         window = Gtk.ApplicationWindow(application=self, title="Fan Control")
         window.set_default_size(1100, 760)
@@ -154,8 +164,8 @@ class FanApplication(Gtk.Application):
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         title = Gtk.Label(label="Fan Control")
         title.add_css_class("title")
-        subtitle = Gtk.Label(label=getattr(self.controller.backend, "name", "unknown"))
-        subtitle.add_css_class("subtitle")
+        sub_text = getattr(self.controller.backend, "name", "fan-daemon") if self.controller else "fan-daemon"
+        subtitle = Gtk.Label(label=sub_text)
         titles.append(title)
         titles.append(subtitle)
         header.set_title_widget(titles)
@@ -189,8 +199,13 @@ class FanApplication(Gtk.Application):
         settings.set_allow_file_access_from_file_urls(False)
         settings.set_allow_universal_access_from_file_urls(False)
         settings.set_javascript_can_access_clipboard(False)
+        try:
+            settings.set_hardware_acceleration_policy(WebKit.HardwareAccelerationPolicy.ALWAYS)
+        except (AttributeError, GLib.Error):
+            pass
 
         webview = WebKit.WebView(web_context=context, user_content_manager=ucm, settings=settings)
+        webview.connect("load-failed", self._on_load_failed)
         if self.args.debug:
             webview.get_inspector().show()
         webview.load_uri(f"{SCHEME}://app/index.html")
@@ -198,6 +213,19 @@ class FanApplication(Gtk.Application):
         window.connect("close-request", self._on_close)
         self.window = window
         self.webview = webview
+
+    def _serve_bytes(self, request, data, mime, status=200):
+        # ES modules always fetch with CORS. finish() sends no ACAO header, so
+        # WebKit discards JS/CSS and the page stays blank.
+        stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data))
+        response = WebKit.URISchemeResponse.new(stream, len(data))
+        response.set_status(status, "OK" if status == 200 else "Error")
+        response.set_content_type(mime)
+        headers = Soup.MessageHeaders.new(Soup.MessageHeadersType.RESPONSE)
+        headers.append("Access-Control-Allow-Origin", "*")
+        headers.append("Cache-Control", "no-store")
+        response.set_http_headers(headers)
+        request.finish_with_response(response)
 
     def _serve_ui(self, request):
         root = ui_root().resolve()
@@ -213,19 +241,17 @@ class FanApplication(Gtk.Application):
             return
         if not candidate.is_file():
             html = (
-                "<!doctype html><meta charset=utf-8><title>Fan Control</title>"
-                "<body style='font:14px sans-serif;padding:2rem'>"
-                "<h1>UI not built</h1><p>Run <code>npm ci && npm run build</code> in <code>ui/</code>.</p>"
-            ).encode()
-            stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(html))
-            request.finish(stream, len(html), "text/html")
+                b"<!doctype html><meta charset=utf-8><title>Fan Control</title>"
+                b"<body style='font:14px sans-serif;padding:2rem'>"
+                b"<h1>UI not built</h1><p>Run <code>npm ci && npm run build</code> in <code>ui/</code>.</p>"
+            )
+            self._serve_bytes(request, html, "text/html")
             return
         data = candidate.read_bytes()
         mime = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
         if candidate.name.endswith(".js"):
             mime = "text/javascript"
-        stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data))
-        request.finish(stream, len(data), mime)
+        self._serve_bytes(request, data, mime)
 
     def _on_message(self, _ucm, js_value, reply):
         try:
@@ -239,9 +265,11 @@ class FanApplication(Gtk.Application):
                 ctx = js_value.get_context()
                 reply.return_value(JSC.Value.new_from_json(ctx, json.dumps({"ok": True, "async": True})))
                 return
-            result = self.controller.handle(method, params)
+            result = self._rpc.handle(method, params)
             ctx = js_value.get_context()
             reply.return_value(JSC.Value.new_from_json(ctx, json.dumps(result, default=str)))
+            if method not in ("snapshot", "history", "history.export", "diagnose", "curves.list", "curves.export"):
+                GLib.idle_add(self._push_full)
         except Exception as exc:
             reply.return_error_message(str(exc))
             if self.args.debug:
@@ -262,7 +290,7 @@ class FanApplication(Gtk.Application):
     def _save_csv(self, dialog, result):
         try:
             file = dialog.save_finish(result)
-            payload = self.controller.handle("history.export", {})["csv"]
+            payload = self._rpc.handle("history.export", {})["csv"]
             file.replace_contents(payload.encode(), None, False, Gio.FileCreateFlags.NONE, None)
             self._eval_event("toast", {"message": "History exported"})
         except GLib.Error:
@@ -273,7 +301,7 @@ class FanApplication(Gtk.Application):
     def _save_curve(self, dialog, result, params):
         try:
             file = dialog.save_finish(result)
-            exported = self.controller.handle("curves.export", params)
+            exported = self._rpc.handle("curves.export", params)
             file.replace_contents(json.dumps(exported, indent=2).encode(), None, False, Gio.FileCreateFlags.NONE, None)
             self._eval_event("toast", {"message": "Curve exported"})
         except GLib.Error:
@@ -287,9 +315,9 @@ class FanApplication(Gtk.Application):
             _ok, contents, _etag = file.load_contents()
             data = json.loads(contents)
             name = data.get("name") or pathlib.Path(file.get_basename()).stem
-            self.controller.handle("curves.save", {"name": name, "curve": data.get("curve")})
+            self._rpc.handle("curves.save", {"name": name, "curve": data.get("curve")})
             self._eval_event("toast", {"message": f"Imported {name}"})
-            self._push_snapshot()
+            self._push_full()
         except GLib.Error:
             pass
         except Exception as exc:
@@ -298,27 +326,64 @@ class FanApplication(Gtk.Application):
     def _eval_event(self, name, payload):
         if not self.webview:
             return
-        script = "window.__fanControl&&window.__fanControl.event(" + json.dumps(name) + "," + json.dumps(payload, default=str) + ")"
+        blob = json.dumps(payload, default=str, separators=(",", ":"))
+        if name == "live" and blob == getattr(self, "_last_live", None):
+            return
+        if name == "live":
+            self._last_live = blob
+        script = "window.__fanControl&&window.__fanControl.event(" + json.dumps(name) + "," + blob + ")"
         self.webview.evaluate_javascript(script, -1, None, None, None, None)
 
-    def _push_snapshot(self):
+    def _push_live(self):
+        return self._push_snapshot(False)
+
+    def _push_full(self):
+        self._push_snapshot(True)
+        return False
+
+    def _push_snapshot(self, full=False):
         if self.stop.is_set() or not self.webview:
             return False
-        snap = self.controller.snapshot()
-        self._eval_event("snapshot", snap)
+        try:
+            snap = self._rpc.handle("snapshot" if full else "live", {})
+        except Exception:
+            if self.status_label and self.status_label.get_text() != "Daemon unreachable":
+                self.status_label.set_text("Daemon unreachable")
+            return True
+        self._eval_event("snapshot" if full else "live", snap)
+        self._update_header(snap)
         self._maybe_notify(snap)
         return True
 
     def _push_history(self):
         if self.stop.is_set() or not self.webview:
             return False
-        self._eval_event("history", self.controller.handle("history", {}))
+        try:
+            payload = self._rpc.handle("history", {})
+        except Exception:
+            return True
+        hist = payload.get("history") or []
+        if not getattr(self, "_history_seeded", False):
+            self._history_seeded = True
+            self._eval_event("history", payload)
+        elif hist:
+            self._eval_event("history-append", hist[-1])
         return True
 
-    def _update_header(self):
+    def _update_header_status(self, text):
+        if self.status_label and self.status_label.get_text() != text:
+            self.status_label.set_text(text)
+
+    def _update_header(self, snap=None):
         if self.stop.is_set() or not self.status_label:
             return False
-        snap = self.controller.snapshot()
+        if snap is None:
+            try:
+                snap = self._rpc.handle("live", {})
+            except Exception:
+                if self.status_label.get_text() != "Daemon unreachable":
+                    self.status_label.set_text("Daemon unreachable")
+                return True
         age = time.time() - (snap.get("updated") or 0)
         if age < 3:
             text = "Live"
@@ -330,7 +395,8 @@ class FanApplication(Gtk.Application):
             text = "Critical cooling"
         if snap.get("demo"):
             text = f"Demo · {text}"
-        self.status_label.set_text(text)
+        if self.status_label.get_text() != text:
+            self.status_label.set_text(text)
         return True
 
     def _maybe_notify(self, snap):
@@ -346,6 +412,8 @@ class FanApplication(Gtk.Application):
             self._notified_critical = False
 
     def _start_loops(self):
+        if not self.controller:
+            return
         def loop(fn, interval):
             while not self.stop.wait(interval):
                 try:
@@ -354,15 +422,19 @@ class FanApplication(Gtk.Application):
                     traceback.print_exc()
 
         threading.Thread(target=loop, args=(self.controller.tick_sensors, 2), daemon=True).start()
-        threading.Thread(target=loop, args=(self.controller.tick_readback, 0.25), daemon=True).start()
+        threading.Thread(target=loop, args=(self.controller.tick_readback, 1), daemon=True).start()
         threading.Thread(target=loop, args=(self.controller.tick_control, 0.25), daemon=True).start()
         threading.Thread(target=loop, args=(self.controller.tick_history, 2), daemon=True).start()
         try:
             self.controller.tick_sensors()
             self.controller.tick_readback()
+            self.controller.tick_control()
             self.controller.tick_history()
         except Exception:
             traceback.print_exc()
+    def _on_load_failed(self, _view, _event, uri, error):
+        print(f"WebKit load failed: {uri}: {error}", flush=True)
+        return False
 
     def _on_close(self, *_):
         self._teardown()
@@ -374,12 +446,8 @@ class FanApplication(Gtk.Application):
         self.stop.set()
         if self.controller:
             self.controller.close()
-        if self.lock:
-            self.lock.release()
-        clear_pid(self.runtime, "gui.pid")
-        if not self.args.demo:
-            start_daemon()
-
+        if self._rpc:
+            self._rpc.close()
     def do_shutdown(self):
         self._teardown()
         Gtk.Application.do_shutdown(self)
@@ -451,16 +519,13 @@ class TrayApplication(Gtk.Application):
         self._dummy = dummy
 
     def _set_profile(self, name):
-        if gui_lock_held(self.runtime):
+        try:
+            with RpcClient(control_socket_path(self.runtime)) as client:
+                client.call("profile", {"profile": name})
+        except Exception:
             notification = Gio.Notification.new("Fan Control")
-            notification.set_body("Dashboard has exclusive control")
-            self.send_notification("exclusive", notification)
-            return
-        config = load_config(self.config_path)
-        config["profile"] = name
-        config["mode"] = "curve"
-        save_config(self.config_path, config)
-        signal_daemon(self.runtime)
+            notification.set_body("fan-daemon unreachable")
+            self.send_notification("error", notification)
         self.popover.popdown()
 
     def _open_gui(self):

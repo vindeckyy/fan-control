@@ -1,0 +1,28 @@
+Source: fan-control
+Section: utils
+Priority: optional
+Maintainer: Fan Control Community <fan-control@community.org>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13),
+               nodejs,
+               npm,
+               python3
+Standards-Version: 4.6.2
+Homepage: https://github.com/vindeckyy/fan-control
+
+Package: fan-control
+Architecture: any
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         gir1.2-gtk-4.0,
+         gir1.2-soup-3.0,
+         gir1.2-webkit-6.0,
+         pkexec | policykit-1,
+         python3 (>= 3.10),
+         python3-gi,
+         systemd
+Suggests: nvidia-smi, tuxedo-drivers-dkms
+Description: Safety-focused Linux fan-control daemon and native WebKitGTK workstation
+ Fan Control provides automatic temperature curves, direct manual control,
+ live CPU/GPU telemetry, dual-axis history graphs, and a native desktop
+ dashboard for compatible Clevo and Tongfang embedded controller interfaces.

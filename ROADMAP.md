@@ -19,11 +19,19 @@
 - Live hwmon sensors plus NVIDIA temperature fallback through `nvidia-smi`
 - A second `clevo_acpi` sysfs backend for boards where `tuxedo_io` refuses to bind
 
+- Packaging for common Linux distributions (AUR PKGBUILD, Debian debhelper, Fedora/Copr RPM spec)
+- Resilient background daemon with graceful fallback on corrupt configurations
+- Shared sensor engine with expanded hardware support (AMD zenpower, Intel Arc xe/i915, NVIDIA nouveau & nvidia-smi)
+- Extended CLI `fan-ctl` commands (`cap`, `config`, `curves`)
+- High-efficiency live streaming telemetry (`live_snapshot`, append-only history)
+- Interactive visual curve studio with alignment grid and debounced drag controls
+- Unprivileged WebKitGTK dashboard communicating over a root-owned Unix RPC socket
+- Unified daemon control loop and FanController architecture with strict >=95% changed-line test coverage
+
 ## Next
 
-- Packaging for common Linux distributions (AUR, Debian, Fedora copr)
-- Polkit helper so the WebKit window does not need to run as root
 - Verified Uniwill tach only after a read-only register is confirmed per model
+
 
 ## Later
 

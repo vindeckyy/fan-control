@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import type { HistoryPoint, Snapshot } from "../types";
 import { interpolate } from "../curveMath";
+import { windowedHistory } from "../liveState";
 
 type Props = {
   history: HistoryPoint[];
@@ -14,13 +15,16 @@ const WINDOWS = [5, 15, 30];
 export default function HistoryBoard({ history, snap, onExport }: Props) {
   const [tab, setTab] = useState<"history" | "curve">("history");
   const [windowMin, setWindowMin] = useState(30);
-  const [paused, setPaused] = useState(false);
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
+  const paused = useRef(false);
+  const readout = useRef<HTMLDivElement>(null);
+  const critical = useRef(snap.critical_temp);
+  critical.current = snap.critical_temp;
 
-  const hasRpm = history.some((point) => point.rpm1);
-  const cutoff = Math.floor(Date.now() / 1000) - windowMin * 60;
-  const rows = history.filter((p) => p.time >= cutoff);
+  const nowSec = history.length ? history[history.length - 1].time : Math.floor(Date.now() / 1000);
+  const rows = useMemo(() => windowedHistory(history, windowMin, nowSec), [history, windowMin, nowSec]);
+  const linked = snap.linked !== false;
 
   useEffect(() => {
     if (tab !== "history" || !host.current) return;
@@ -28,17 +32,17 @@ export default function HistoryBoard({ history, snap, onExport }: Props) {
       {},
       { label: "CPU", scale: "C", stroke: "#ffbd5b", width: 2 },
       { label: "GPU", scale: "C", stroke: "#57dfcf", width: 2 },
-      { label: "Control", scale: "C", stroke: "#ffbd5b", width: 1, dash: [6, 4] },
-      { label: "Fan 1", scale: "%", stroke: "#62a8ff", width: 2 },
-      { label: "Fan 2", scale: "%", stroke: "#9ec5ff", width: 2 },
+      { label: "Fan", scale: "%", stroke: "#62a8ff", width: 2 },
     ];
-    if (hasRpm) {
-      series.push({ label: "RPM 1", scale: "rpm", stroke: "#91a0b7", width: 1 });
+    if (!linked) {
+      series.push({ label: "Fan 2", scale: "%", stroke: "#9ec5ff", width: 2 });
     }
     const opts: uPlot.Options = {
       width: host.current.clientWidth || 800,
       height: 220,
+      legend: { show: false },
       scales: {
+        x: { time: true, auto: false },
         C: { range: [0, 110] },
         "%": { range: [0, 100] },
       },
@@ -52,12 +56,26 @@ export default function HistoryBoard({ history, snap, onExport }: Props) {
       hooks: {
         setCursor: [
           (u) => {
-            setPaused(u.cursor.idx != null);
+            const idx = u.cursor.idx;
+            paused.current = idx != null;
+            const el = readout.current;
+            if (!el) return;
+            if (idx == null) {
+              el.textContent = "Hover a point for values";
+              return;
+            }
+            const time = u.data[0][idx];
+            const cpu = u.data[1][idx];
+            const gpu = u.data[2][idx];
+            const fan = u.data[3][idx];
+            const when = typeof time === "number" ? new Date(time * 1000).toLocaleTimeString() : "--";
+            const fmt = (value: number | null | undefined) => (value == null ? "--" : String(Math.round(value * 10) / 10));
+            el.textContent = `${when}  CPU ${fmt(cpu)}°C  GPU ${fmt(gpu)}°C  Fan ${fmt(fan)}%`;
           },
         ],
         draw: [
           (u) => {
-            const y = u.valToPos(snap.critical_temp, "C", true);
+            const y = u.valToPos(critical.current, "C", true);
             u.ctx.save();
             u.ctx.strokeStyle = "#ff657a";
             u.ctx.setLineDash([4, 4]);
@@ -70,7 +88,7 @@ export default function HistoryBoard({ history, snap, onExport }: Props) {
         ],
       },
     };
-    const instance = new uPlot(opts, [[], [], [], [], [], []], host.current);
+    const instance = new uPlot(opts, [[], [], [], []], host.current);
     plot.current = instance;
     const ro = new ResizeObserver(() => {
       instance.setSize({ width: host.current?.clientWidth || 800, height: 220 });
@@ -81,22 +99,22 @@ export default function HistoryBoard({ history, snap, onExport }: Props) {
       instance.destroy();
       plot.current = null;
     };
-  }, [tab, snap.critical_temp, hasRpm]);
+  }, [tab, linked, rows.length >= 2]);
 
   useEffect(() => {
-    if (!plot.current || paused || tab !== "history") return;
-    const hasRpm = plot.current.series.length > 6;
+    if (!plot.current || paused.current || tab !== "history") return;
+    const end = nowSec;
+    const start = end - windowMin * 60;
     const data: uPlot.AlignedData = [
       rows.map((p) => p.time),
       rows.map((p) => p.temp),
       rows.map((p) => p.gpu_temp),
-      rows.map((p) => p.control_temp),
       rows.map((p) => p.fan1),
-      rows.map((p) => p.fan2),
     ];
-    if (hasRpm) data.push(rows.map((p) => p.rpm1));
-    plot.current.setData(data);
-  }, [rows, paused, tab]);
+    if (!linked) data.push(rows.map((p) => p.fan2));
+    plot.current.setData(data, false);
+    plot.current.setScale("x", { min: start, max: end });
+  }, [rows, tab, linked, windowMin, nowSec]);
 
   const curve = snap.profile === "custom" || snap.mode === "curve" ? snap.custom_curve || snap.curve : snap.curve;
   const cpuCurve = !snap.linked && snap.curve_cpu ? snap.curve_cpu : curve;
@@ -137,9 +155,10 @@ export default function HistoryBoard({ history, snap, onExport }: Props) {
             <span><i style={{ background: "var(--amber)" }} />CPU</span>
             <span><i style={{ background: "var(--cyan)" }} />GPU</span>
             <span><i style={{ background: "var(--blue)" }} />Fan duty</span>
-            <span><i style={{ background: "var(--red)" }} />Critical</span>
+            <span><i style={{ background: "var(--red)" }} />Critical {snap.critical_temp}°C</span>
           </div>
           {rows.length < 2 ? <div className="empty">Collecting history…</div> : <div className="chartWrap" ref={host} />}
+          <div className="chartReadout" ref={readout}>Hover a point for values</div>
         </>
       )}
       {tab === "curve" && (

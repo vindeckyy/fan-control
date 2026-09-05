@@ -90,9 +90,21 @@ input:disabled { opacity: 0.38; }
 .sectionHead h2 { font-size: 14px; margin: 0; }
 .sensorList, .settings { display: grid; gap: 8px; }
 .sensor {
-  display: flex; justify-content: space-between; align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
   padding: 10px 12px; border-radius: 11px; background: var(--raised); border: 1px solid var(--line);
 }
+.sensorLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sensor button.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 18%, transparent);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.fan.selected { background: color-mix(in srgb, var(--blue) 6%, transparent); border-radius: 12px; padding-left: 8px; padding-right: 8px; }
+.chartReadout { color: var(--muted); font-size: 11px; margin-top: 8px; font-variant-numeric: tabular-nums; }
 .sensor.hot { border-color: var(--red); }
 .sensor button { background: none; border: 0; color: var(--blue); padding: 0; }
 .tabs { display: flex; gap: 6px; }

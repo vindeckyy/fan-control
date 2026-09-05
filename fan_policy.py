@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import pathlib
 
-from fan_backend import MAX_DUTY_PERCENT, TUXEDO_NATIVE_MAX, migrate_config
+from fan_backend import MAX_DUTY_PERCENT, migrate_config
 
 SAFE_MAX_DUTY = MAX_DUTY_PERCENT
 FAULT_MISS_THRESHOLD = 3
-CPU_CHIPS = ("k10temp", "coretemp")
-GPU_CHIPS = ("amdgpu",)
-GPU_NAME_HINTS = ("nvidia", "amdgpu")
+CPU_CHIPS = ("k10temp", "coretemp", "zenpower")
+GPU_CHIPS = ("amdgpu", "radeon", "nouveau", "i915", "xe")
+GPU_NAME_HINTS = ("nvidia", "amdgpu", "radeon", "nouveau", "intel_gpu", "gpu")
+
 
 PROFILES = {
     "silent": [(0, 0), (50, 0), (60, 0), (70, 30), (80, 61), (90, 86), (95, 100), (110, 100)],
@@ -53,7 +54,7 @@ def interpolate(temp, curve):
         return curve[0][1]
     if temp >= curve[-1][0]:
         return curve[-1][1]
-    for (t0, d0), (t1, d1) in zip(curve, curve[1:]):
+    for (t0, d0), (t1, d1) in zip(curve, curve[1:], strict=False):
         if t0 <= temp < t1:
             return d0 + (d1 - d0) * (temp - t0) / (t1 - t0)
     return curve[-1][1]
@@ -138,9 +139,53 @@ def pick_gpu_temp(sensors, pin=None):
         and (
             sensor.get("name") in GPU_CHIPS
             or any(hint in str(sensor.get("name", "")).lower() for hint in GPU_NAME_HINTS)
+            or "gpu" in str(sensor.get("label", "")).lower()
         )
     ]
     return max(values) if values else None
+
+
+def scan_sensors(demo=False, include_nvidia=True, hwmon_dir="/sys/class/hwmon"):
+    """Discover live thermal sensors from sysfs hwmon and optional nvidia-smi."""
+    if demo:
+        import math
+        import time
+        return [
+            {"name": "k10temp", "label": "Tctl", "temp": 62 + 10 * math.sin(time.monotonic() / 18)},
+            {"name": "k10temp", "label": "Tccd1", "temp": 58 + 8 * math.sin(time.monotonic() / 21)},
+            {"name": "amdgpu", "label": "edge", "temp": 54 + 7 * math.sin(time.monotonic() / 23)},
+        ]
+    found = []
+    base = pathlib.Path(hwmon_dir)
+    if base.exists():
+        for hwmon in sorted(base.glob("hwmon*")):
+            try:
+                name = (hwmon / "name").read_text().strip()
+            except OSError:
+                continue
+            for path in sorted(hwmon.glob("temp*_input")):
+                try:
+                    temp = int(path.read_text().strip()) / 1000
+                    if 0 <= temp <= 150:
+                        label_path = path.with_name(path.name.replace("_input", "_label"))
+                        label = label_path.read_text().strip() if label_path.exists() else path.stem.replace("_input", "")
+                        found.append({"name": name, "label": label, "temp": temp})
+                except (OSError, ValueError):
+                    continue
+    if include_nvidia and not any("nvidia" in str(s.get("name", "")).lower() for s in found):
+        import shutil
+        import subprocess
+        if shutil.which("nvidia-smi"):
+            try:
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=index,temperature.gpu,name", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=2, check=False,
+                )
+                if result.returncode == 0:
+                    found.extend(parse_nvidia_smi(result.stdout))
+            except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                pass
+    return found
 
 
 def _temp_for_fan(fan, cpu_temp, gpu_temp, linked):
@@ -222,9 +267,7 @@ def decide(
     if critical:
         duties = {fan: SAFE_MAX_DUTY for fan in fans}
     elif mode == "curve":
-        curve = shared_curve if profile != "custom" else shared_curve
-        if profile in PROFILES and profile != "custom":
-            curve = PROFILES[profile]
+        curve = PROFILES[profile] if profile in PROFILES and profile != "custom" else shared_curve
         duties = desired_curve_duties(
             cpu_temp,
             gpu_temp,

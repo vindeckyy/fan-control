@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { call, onFanEvent } from "./bridge";
-import type { CurvePoint, HistoryPoint, Snapshot } from "./types";
+import type { HistoryPoint, Snapshot } from "./types";
+import { applyLive } from "./liveState";
 import Banners from "./components/Banners";
 import CurveStudio from "./components/CurveStudio";
 import FanCards from "./components/FanCard";
@@ -10,12 +11,18 @@ import SafetyDrawer from "./components/SafetyDrawer";
 import SensorRail from "./components/SensorRail";
 import Toast from "./components/Toast";
 
+const HISTORY_CAP = 900;
+
 export default function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [toast, setToast] = useState("");
   const [diagnose, setDiagnose] = useState("");
   const [selectedFan, setSelectedFan] = useState(1);
+  const snapRef = useRef(snap);
+  const selectedRef = useRef(selectedFan);
+  snapRef.current = snap;
+  selectedRef.current = selectedFan;
 
   function note(message: string) {
     setToast(message);
@@ -33,6 +40,9 @@ export default function App() {
     }
   }
 
+  const runRef = useRef(run);
+  runRef.current = run;
+
   useEffect(() => {
     void run("snapshot").then((value) => value && setSnap(value as Snapshot));
     void run("history").then((value) => {
@@ -41,7 +51,19 @@ export default function App() {
     });
     return onFanEvent((name, payload) => {
       if (name === "snapshot") setSnap(payload as Snapshot);
+      if (name === "live") setSnap((current) => (current ? applyLive(current, payload as Snapshot) : current));
       if (name === "history") setHistory((payload as { history: HistoryPoint[] }).history || []);
+      if (name === "history-append") {
+        const point = payload as HistoryPoint;
+        if (!point || typeof point.time !== "number") return;
+        setHistory((current) => {
+          const last = current[current.length - 1];
+          if (last && last.time === point.time) {
+            return current.slice(0, -1).concat(point).slice(-HISTORY_CAP);
+          }
+          return current.concat(point).slice(-HISTORY_CAP);
+        });
+      }
       if (name === "toast") note((payload as { message: string }).message);
     });
   }, []);
@@ -56,27 +78,30 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!snap) return;
+      const current = snapRef.current;
+      if (!current) return;
+      const runNow = runRef.current;
+      const fan = selectedRef.current;
       const modes: Array<() => void> = [
-        () => run("mode", { mode: "manual" }, "Manual"),
-        () => run("profile", { profile: "silent" }, "Silent"),
-        () => run("profile", { profile: "balanced" }, "Balanced"),
-        () => run("profile", { profile: "performance" }, "Performance"),
-        () => run("profile", { profile: "custom" }, "Custom"),
-        () => run("mode", { mode: "released" }, "EC Auto"),
+        () => runNow("mode", { mode: "manual" }, "Manual"),
+        () => runNow("profile", { profile: "silent" }, "Silent"),
+        () => runNow("profile", { profile: "balanced" }, "Balanced"),
+        () => runNow("profile", { profile: "performance" }, "Performance"),
+        () => runNow("profile", { profile: "custom" }, "Custom"),
+        () => runNow("mode", { mode: "released" }, "EC Auto"),
       ];
       if (event.key >= "1" && event.key <= "6") modes[Number(event.key) - 1]();
-      if (event.key === "e" || event.key === "E") run("mode", { mode: "released" }, "EC Auto");
-      if (event.key === "l" || event.key === "L") run("config", { linked: !snap.linked }, snap.linked ? "Unlinked" : "Linked");
+      if (event.key === "e" || event.key === "E") runNow("mode", { mode: "released" }, "EC Auto");
+      if (event.key === "l" || event.key === "L") runNow("config", { linked: !current.linked }, current.linked ? "Unlinked" : "Linked");
       if (event.key === "[" || event.key === "]") {
         const delta = event.key === "]" ? 5 : -5;
-        const current = Number(snap.targets[String(selectedFan)] ?? 0);
-        run("set", { fan: selectedFan, pct: Math.max(0, Math.min(100, current + delta)) });
+        const value = Number(current.targets[String(fan)] ?? 0);
+        runNow("set", { fan, pct: Math.max(0, Math.min(100, value + delta)) });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [snap, selectedFan]);
+  }, []);
 
   const spark = useMemo(
     () => history.filter((p) => p.time >= Math.floor(Date.now() / 1000) - 60).map((p) => p.control_temp),

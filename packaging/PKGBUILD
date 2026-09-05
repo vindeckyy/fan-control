@@ -1,0 +1,46 @@
+# Maintainer: Fan Control Community <fan-control@community.org>
+pkgname=fan-control
+pkgver=2026.9.1
+pkgrel=1
+pkgdesc="Safety-focused Linux fan-control daemon and native WebKitGTK workstation for Clevo/Tongfang systems"
+arch=('x86_64')
+url="https://github.com/vindeckyy/fan-control"
+license=('MIT')
+depends=(
+    'python>=3.10'
+    'python-gobject'
+    'gtk4'
+    'webkitgtk-6.0'
+    'polkit'
+    'systemd'
+)
+makedepends=(
+    'nodejs'
+    'npm'
+)
+optdepends=(
+    'tuxedo-drivers-dkms: tuxedo_io EC character device backend'
+    'clevo-acpi-dkms: clevo_acpi sysfs backend'
+    'nvidia-utils: NVIDIA GPU temperature telemetry via nvidia-smi'
+)
+backup=('etc/fan-control.json')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname-$pkgver"
+    make ui
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
+    cd ui && npm test
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    make DESTDIR="$pkgdir" PREFIX=/usr install
+    install -Dm644 packaging/sysusers.conf "$pkgdir/usr/lib/sysusers.d/fan-control.conf"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
+}

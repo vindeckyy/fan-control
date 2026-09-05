@@ -74,15 +74,12 @@ Fan Control treats thermal control as a safety-critical path:
   system firmware until valid telemetry returns.
 - On the `clevo_acpi` backend, the kernel-side watchdog independently releases
   to firmware auto if the controlling process stops renewing a manual override.
-- The dashboard and daemon never intentionally own the EC interface at the
-  same time. Opening the window stops `fan-daemon`; closing it starts it again.
+- The background daemon (`fan-daemon`) is the sole root owner of the EC
+  interface and runs continuously.
+- The dashboard window runs unprivileged as the desktop user. WebKit never
+  runs as root; it communicates with `fan-daemon` over a local Unix socket
+  restricted to the `fan-control` group (`0660 root:fan-control`).
 - Safety-critical policy lives in Python (`fan_policy.py`), not in JavaScript.
-
-The dashboard process currently needs the same privileges as the daemon in
-order to own the EC. WebKit therefore may run as root. The UI is loaded from a
-custom `fancontrol://` origin with no network `connect-src`, which is why that
-privilege boundary matters.
-
 > [!CAUTION]
 > Confirm the reported temperatures and physical fan response on your exact
 > machine. Incorrect low-level fan control can cause overheating or hardware
@@ -105,9 +102,9 @@ Clone, build the UI, and install:
 git clone https://github.com/vindeckyy/fan-control.git
 cd fan-control
 sudo make install
+sudo usermod -aG fan-control $USER
 sudo systemctl daemon-reload
 sudo systemctl enable --now fan-daemon
-```
 
 Check the service after installation:
 
@@ -118,16 +115,14 @@ journalctl -u fan-daemon -n 50 --no-pager
 
 ## Usage
 
-Open the native dashboard (EC access still needs root):
+Open the native dashboard (runs unprivileged; no sudo needed):
 
 ```bash
-sudo fan-gui
-# or
-pkexec fan-gui
+fan-gui
 ```
 
-While the window is open it stops `fan-daemon` and takes exclusive EC ownership.
-Closing the window releases the EC and restarts the daemon.
+`fan-daemon` remains running in the background while the window is open and
+continues managing the embedded controller.
 
 Preview without root or compatible hardware:
 
@@ -152,21 +147,23 @@ CLI:
 
 ```bash
 fan-ctl status --json
-sudo fan-ctl profile silent
-sudo fan-ctl mode released
-sudo fan-ctl set 1 40
-fan-ctl curve
-sudo fan-ctl diagnose
+fan-ctl profile silent
+fan-ctl mode released
+fan-ctl set 1 40
+fan-ctl cap 80
+fan-ctl config hysteresis=3 linked=false
+fan-ctl curve cpu
+fan-ctl curves
+fan-ctl curves load quiet
+fan-ctl diagnose
 ```
-
-`fan-ctl` refuses exclusive changes while the dashboard lock is held.
 
 Run the daemon directly:
 
 ```bash
-sudo fan-daemon --profile balanced
-fan-daemon --dry-run --profile silent
-sudo fan-daemon --diagnose
+sudo fan-daemon
+fan-daemon --dry-run
+fan-daemon --diagnose
 ```
 
 ## Configuration
@@ -223,11 +220,13 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
 
 - `fan_backend.py` — hardware backends.
 - `fan_policy.py` — shared curves, interpolation, critical override, config.
-- `fan_controller.py` — JSON-RPC methods used by the native UI.
-- `fan_gtk.py` — GTK4 + WebKitGTK 6 window and display-only tray.
+- `fan_controller.py` — controller logic and JSON-RPC dispatch methods.
+- `fan_rpc.py` — Unix-socket JSON-RPC server and client.
+- `fan_diagnostics.py` — system and hardware diagnostics.
+- `fan_gtk.py` — unprivileged GTK4 + WebKitGTK 6 dashboard and tray.
 - `fan-gui.py` — entry point (`--demo`, `--tray`, `--headless-smoke`).
-- `fan-daemon.py` — systemd background control; reloads on SIGHUP.
-- `fan-ctl.py` — CLI that edits config and signals the daemon.
+- `fan-daemon.py` — systemd background control service and sole EC owner.
+- `fan-ctl.py` — CLI client communicating with the daemon over the socket.
 - `ui/` — React + Vite dashboard loaded from `fancontrol://app/`.
 
 ## Troubleshooting

@@ -1,7 +1,5 @@
 [Unit]
 Description=Fan control daemon
-# The native dashboard takes exclusive EC ownership while it is open.
-# Opening fan-gui stops this unit; closing it starts it again.
 
 [Service]
 Type=simple

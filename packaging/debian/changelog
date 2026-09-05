@@ -1,0 +1,6 @@
+fan-control (2026.9.1-1) unstable; urgency=medium
+
+  * Initial Debian package release.
+  * Native WebKitGTK workstation and safety-critical background daemon.
+
+ -- Fan Control Community <fan-control@community.org>  Thu, 03 Sep 2026 21:00:00 -0400

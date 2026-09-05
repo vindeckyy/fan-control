@@ -12,8 +12,10 @@ import sys
 
 _ROOT = pathlib.Path(__file__).resolve().parent
 for _candidate in (_ROOT, pathlib.Path("/usr/local/lib/fan-control"), pathlib.Path("/usr/lib/fan-control")):
-    if (_candidate / "fan_backend.py").is_file() and str(_candidate) not in sys.path:
-        sys.path.insert(0, str(_candidate))
+    if (_candidate / "fan_backend.py").is_file():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
 
 from fan_backend import DemoBackend, detect_backend
 from fan_controller import FanController
@@ -47,6 +49,8 @@ def main():
     parser.add_argument("--port", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.demo and args.config == "/etc/fan-control.json" and "FAN_CONTROL_CONFIG" not in os.environ:
+        args.config = "/tmp/fan-control-demo.json"
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     if args.headless_smoke:
         try:

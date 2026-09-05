@@ -9,7 +9,7 @@ METAINFODIR = $(DESTDIR)$(PREFIX)/share/metainfo
 UNITDIR = $(DESTDIR)/etc/systemd/system
 POLICYDIR = $(DESTDIR)$(PREFIX)/share/polkit-1/actions
 
-.PHONY: all ui test install uninstall
+.PHONY: all ui test lint install uninstall
 
 all: ui
 
@@ -19,13 +19,15 @@ ui:
 test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 	cd ui && npm test
+lint:
+	ruff check .
 
 install: ui
 	install -d $(BINDIR) $(LIBDIR) $(SHAREDIR)/ui $(APPDIR) $(ICONDIR) $(METAINFODIR) $(POLICYDIR)
 	install -Dm755 fan-daemon.py $(BINDIR)/fan-daemon
 	install -Dm755 fan-gui.py $(BINDIR)/fan-gui
 	install -Dm755 fan-ctl.py $(BINDIR)/fan-ctl
-	install -m644 fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_gtk.py $(LIBDIR)/
+	install -m644 fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_gtk.py fan_rpc.py fan_diagnostics.py $(LIBDIR)/
 	cp -a ui/dist/. $(SHAREDIR)/ui/
 	install -Dm644 packaging/fan-control.desktop $(APPDIR)/fan-control.desktop
 	install -Dm644 packaging/icons/fan-control.svg $(ICONDIR)/fan-control.svg

@@ -29,7 +29,7 @@ export default function SensorRail({ snap, onPin }: Props) {
               const gpuPinned = snap.gpu_sensor?.name === sensor.name && snap.gpu_sensor?.label === sensor.label;
               return (
                 <div className={`sensor${hot ? " hot" : ""}`} key={`${sensor.name}-${sensor.label}`}>
-                  <span>
+                  <span className="sensorLabel">
                     {sensor.label}
                     {hot ? " · critical" : ""}
                     {cpuPinned ? " · CPU pin" : ""}
@@ -37,10 +37,18 @@ export default function SensorRail({ snap, onPin }: Props) {
                   </span>
                   <b>{sensor.temp.toFixed(1)}°C</b>
                   <span className="row">
-                    <button type="button" onClick={() => onPin("cpu_sensor", cpuPinned ? null : { name: sensor.name, label: sensor.label })}>
+                    <button
+                      type="button"
+                      className={cpuPinned ? "active" : ""}
+                      onClick={() => onPin("cpu_sensor", cpuPinned ? null : { name: sensor.name, label: sensor.label })}
+                    >
                       CPU
                     </button>
-                    <button type="button" onClick={() => onPin("gpu_sensor", gpuPinned ? null : { name: sensor.name, label: sensor.label })}>
+                    <button
+                      type="button"
+                      className={gpuPinned ? "active" : ""}
+                      onClick={() => onPin("gpu_sensor", gpuPinned ? null : { name: sensor.name, label: sensor.label })}
+                    >
                       GPU
                     </button>
                   </span>

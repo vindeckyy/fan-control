@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CurvePoint, Snapshot } from "../types";
 import { interpolate, normalizeCurve, pathForCurve } from "../curveMath";
+import { curvesEqual } from "../liveState";
 
 type Which = "shared" | "cpu" | "gpu";
 
@@ -30,9 +31,10 @@ export default function CurveStudio({
   const named = Object.keys(snap.named_curves || {});
 
   useEffect(() => {
-    if (which === "cpu" && snap.curve_cpu) setPoints(snap.curve_cpu);
-    else if (which === "gpu" && snap.curve_gpu) setPoints(snap.curve_gpu);
-    else setPoints(snap.custom_curve || snap.curve);
+    let next = snap.custom_curve || snap.curve;
+    if (which === "cpu" && snap.curve_cpu) next = snap.curve_cpu;
+    else if (which === "gpu" && snap.curve_gpu) next = snap.curve_gpu;
+    setPoints((current) => (curvesEqual(current, next) ? current : next));
   }, [snap.custom_curve, snap.curve, snap.curve_cpu, snap.curve_gpu, which]);
 
   const width = 1000;
@@ -74,6 +76,23 @@ export default function CurveStudio({
     setPoints((current) => current.map((point, i) => (i === selected ? [temp, duty] : point)));
   }
 
+  function onPointerUp(event: React.PointerEvent<SVGSVGElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // pointer capture already released
+      }
+    }
+    setPoints((current) => {
+      try {
+        return normalizeCurve(current);
+      } catch {
+        return current;
+      }
+    });
+  }
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
@@ -113,8 +132,17 @@ export default function CurveStudio({
         preserveAspectRatio="none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
         aria-label="Fan curve editor"
       >
+        <g className="curveGrid" stroke="var(--line)" strokeWidth="1" strokeDasharray="3 3">
+          {[20, 40, 60, 80, 100].map((t) => (
+            <line key={`vt-${t}`} x1={(t / 110) * width} y1={0} x2={(t / 110) * width} y2={height} />
+          ))}
+          {[20, 40, 60, 80].map((d) => (
+            <line key={`hd-${d}`} x1={0} y1={height - (d / 100) * height} x2={width} y2={height - (d / 100) * height} />
+          ))}
+        </g>
         <path d={path} fill="none" stroke="var(--blue)" strokeWidth="3" />
         {points.map(([temp, duty], index) => (
           <circle

@@ -16,8 +16,10 @@ reproduce. Remove serial numbers and other personal information from logs.
 ## Development checks
 
 ```bash
-python3 -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan-daemon.py fan-gui.py fan-ctl.py test_fan_control.py
+python3 -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_rpc.py fan_diagnostics.py fan-daemon.py fan-gui.py fan-ctl.py fan_gtk.py test_fan_control.py
 python3 -m unittest -v
+make lint
+python3 scripts/check_versions.py
 cd ui && npm ci && npm test && npm run build
 ```
 
@@ -45,6 +47,14 @@ pull request must explain:
 
 Keep pull requests focused. Update tests and documentation with behavior
 changes, and clearly call out anything that could not be tested physically.
+
+## Releasing
+
+When bumping versions, update `packaging/PKGBUILD`, `packaging/fan-control.spec`, `packaging/debian/changelog`, and `packaging/org.community.FanControl.metainfo.xml`, then verify with:
+
+```bash
+python3 scripts/check_versions.py
+```
 
 By contributing, you confirm that you have the right to submit the work and
 agree that it may be distributed with the project under its applicable terms.
