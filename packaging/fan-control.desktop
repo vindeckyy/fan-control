@@ -2,7 +2,7 @@
 Type=Application
 Name=Fan Control
 Comment=Unofficial local thermal control for Clevo/Tongfang systems
-Exec=pkexec /usr/local/bin/fan-gui
+Exec=fan-gui
 Icon=fan-control
 Terminal=false
 Categories=System;HardwareSettings;Settings;

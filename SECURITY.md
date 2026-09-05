@@ -24,11 +24,12 @@ Security-relevant areas include:
 
 - the WebKitGTK JSON-RPC bridge (`script-message-with-reply-received`);
 - the custom `fancontrol://` origin and Content-Security-Policy;
-- privileged process boundaries (the dashboard may run as root while it owns the EC);
+- privileged process boundaries (the background daemon runs as root to access the EC; the desktop dashboard runs unprivileged and communicates via /run/fan-control/control.sock restricted to the fan-control group);
 - configuration handling;
 - EC read/write validation;
 - firmware handoff;
 - exclusive lock files under `/run/fan-control`.
+- Unix domain socket framing, permissions (0660 root:fan-control), and access control;
 
 There is no HTTP API and no TCP listener. The previous localhost dashboard
 on port 4444 has been removed.

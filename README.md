@@ -48,7 +48,7 @@ one is present; use `--backend` or `FAN_CONTROL_BACKEND` to override.
 | Backend | `tuxedo_io` (ioctls on a `/dev/*_io` device) or `clevo_acpi` (sysfs) |
 | Desktop | GTK 4 and WebKitGTK 6 (`gir1.2-gtk-4.0`, `gir1.2-webkit-6.0`, `python3-gi`) |
 | Runtime | Python 3.10 or newer |
-| Privileges | Root access for EC reads and writes |
+| Privileges | Root access for the background daemon; desktop dashboard runs unprivileged |
 | Service manager | systemd for the included background service |
 | NVIDIA telemetry | Optional; requires a working `nvidia-smi` command |
 
@@ -86,6 +86,18 @@ Fan Control treats thermal control as a safety-critical path:
 > damage.
 
 ## Installation
+
+### Package installation
+
+Download the binary package from [GitHub Releases](https://github.com/vindeckyy/fan-control/releases/latest) (Debian, Ubuntu, Kali):
+
+```bash
+sudo dpkg -i fan-control_2026.9.1-1_amd64.deb
+sudo usermod -aG fan-control $USER
+sudo systemctl enable --now fan-daemon
+```
+
+### From source
 
 Debian/Kali:
 
@@ -127,7 +139,6 @@ continues managing the embedded controller.
 Preview without root or compatible hardware:
 
 ```bash
-cd ui && npm ci && npm run build && cd ..
 FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo
 ```
 
@@ -137,7 +148,7 @@ Headless snapshot for CI and scripts:
 FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo --headless-smoke
 ```
 
-Display-only tray (never locks the EC; profile changes SIGHUP the daemon):
+Display-only tray (never locks the EC; profile changes route over the socket):
 
 ```bash
 fan-gui --tray

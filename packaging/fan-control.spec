@@ -17,7 +17,7 @@ Requires:       python3 >= 3.10
 Requires:       python3-gobject
 Requires:       gtk4
 Requires:       webkitgtk6.0
-Requires:       polkit
+Recommends:     polkit
 Requires:       systemd
 
 Recommends:     tuxedo-drivers

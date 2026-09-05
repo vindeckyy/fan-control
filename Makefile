@@ -9,18 +9,20 @@ METAINFODIR = $(DESTDIR)$(PREFIX)/share/metainfo
 UNITDIR = $(DESTDIR)/etc/systemd/system
 POLICYDIR = $(DESTDIR)$(PREFIX)/share/polkit-1/actions
 
-.PHONY: all ui test lint install uninstall
+.PHONY: all ui test lint clean install uninstall
 
 all: ui
 
 ui:
-	cd ui && npm ci && npm run build
+	@if [ ! -f ui/dist/index.html ]; then cd ui && npm ci && npm run build; fi
 
 test:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 	cd ui && npm test
 lint:
 	ruff check .
+clean:
+	rm -rf ui/dist
 
 install: ui
 	install -d $(BINDIR) $(LIBDIR) $(SHAREDIR)/ui $(APPDIR) $(ICONDIR) $(METAINFODIR) $(POLICYDIR)

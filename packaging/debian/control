@@ -17,10 +17,10 @@ Depends: ${misc:Depends},
          gir1.2-gtk-4.0,
          gir1.2-soup-3.0,
          gir1.2-webkit-6.0,
-         pkexec | policykit-1,
          python3 (>= 3.10),
          python3-gi,
          systemd
+Recommends: polkit
 Suggests: nvidia-smi, tuxedo-drivers-dkms
 Description: Safety-focused Linux fan-control daemon and native WebKitGTK workstation
  Fan Control provides automatic temperature curves, direct manual control,
