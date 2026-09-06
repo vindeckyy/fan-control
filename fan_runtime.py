@@ -16,7 +16,12 @@ def runtime_dir(demo=False, override=None):
         path = pathlib.Path(override)
     else:
         path = DEMO_RUNTIME if demo else DEFAULT_RUNTIME
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        raise OSError(f"runtime path {path} exists and is not a directory") from exc
+    if not path.is_dir():
+        raise OSError(f"runtime path {path} exists and is not a directory")
     return path
 
 

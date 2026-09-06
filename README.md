@@ -31,10 +31,13 @@ open a browser and does not bind a TCP port.
 - Curve hysteresis to prevent rapid speed hunting
 - Automatic handoff to firmware when temperature data becomes unavailable
 - Live hwmon sensors with an NVIDIA `nvidia-smi` fallback and optional pinning
-- Thirty-minute CPU/GPU temperature and fan-duty history with CSV export
+- Thirty-minute live telemetry and SQLite history with retention and CSV export
 - Read-only Clevo tach (RPM) when the backend exposes it; Uniwill tach is not probed
 - Persistent configuration with atomic writes
-- Dark/light themes, desktop notifications, display-only tray, `fan-ctl` CLI
+- Dark/light/system themes, Celsius/Fahrenheit display, desktop notifications, tray controls, `fan-ctl` CLI
+- Dedicated Overview, Fans, Curves, Sensors, Analytics, Automation, Settings, and Diagnostics pages
+- Revision-checked edits, per-fan policies, temporary fan tests, and explainable control decisions
+- Transient automation rules and weekly schedules, including overnight blocks
 - Hardware-free demo mode for safe evaluation and UI development
 
 ## Compatibility
@@ -89,10 +92,10 @@ Fan Control treats thermal control as a safety-critical path:
 
 ### Package installation
 
-Download the binary package from [GitHub Releases](https://github.com/vindeckyy/fan-control/releases/latest) (Debian, Ubuntu, Kali):
+Published packages are available from [GitHub Releases](https://github.com/vindeckyy/fan-control/releases/latest). This working tree contains the unreleased v2 implementation. For a locally built v2 Debian package:
 
 ```bash
-sudo dpkg -i fan-control_2026.9.1-1_amd64.deb
+sudo dpkg -i fan-control_2.0.0-1_amd64.deb
 sudo usermod -aG fan-control $USER
 sudo systemctl enable --now fan-daemon
 ```
@@ -108,15 +111,19 @@ sudo apt install python3 python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0 nodejs npm
 Fedora: `python3-gobject gtk4 webkitgtk6.0 nodejs`.
 Arch: `python-gobject gtk4 webkitgtk-6.0 nodejs npm`.
 
-Clone, build the UI, and install:
+Building the UI requires Node.js 20 or newer. Clone, build the UI, and install:
 
 ```bash
 git clone https://github.com/vindeckyy/fan-control.git
 cd fan-control
 sudo make install
+sudo systemd-sysusers /usr/lib/sysusers.d/fan-control.conf
+sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/fan-control.conf
 sudo usermod -aG fan-control $USER
 sudo systemctl daemon-reload
 sudo systemctl enable --now fan-daemon
+
+```
 
 Check the service after installation:
 
@@ -179,9 +186,17 @@ fan-daemon --diagnose
 
 ## Configuration
 
-Both programs read `/etc/fan-control.json`. The dashboard writes this file
-atomically when settings change. The daemon reloads it on `SIGHUP` /
-`systemctl reload fan-daemon`.
+The daemon owns `/etc/fan-control.json`. Desktop and CLI controls submit RPC
+mutations; they do not write this file. The daemon can reload administrator
+edits on `SIGHUP` / `systemctl reload fan-daemon`.
+
+Version 2 stores fan policies, curves, rules, schedules, safety, display, and
+history preferences in separate sections. Every saved mutation increments
+`revision`. A client can send `expected_revision` to reject stale edits.
+Existing v1 files migrate on load, with a `*.v1.backup.json` preserved before
+the first v2 write. The following flat fields remain supported by the legacy
+RPC adapters; they are not the v2 disk schema. See [the v2 plan](docs/v2-plan.md)
+for the schema and migration contract.
 
 ```json
 {
@@ -215,6 +230,13 @@ when multiple candidates exist.
 
 ## Architecture
 
+The v2 control path is `fan_controller.py` → pure `fan_engine.py` → backend.
+`fan_rules.py` computes temporary rule and schedule overlays. `fan_history.py`
+stores normalized telemetry in SQLite. Every decision records its source,
+requested duty, limits, final duty, and whether the backend write succeeded.
+The React workspace uses hash routing, a typed client, and separate stores
+for connection, configuration, live telemetry, and presentation state.
+
 ```text
 hwmon / NVIDIA telemetry ──► temperature selection ──► curve + safety policy
                                                               │
@@ -229,16 +251,18 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
        firmware auto ◄── ownership handoff ◄── watchdog / release
 ```
 
-- `fan_backend.py` — hardware backends.
-- `fan_policy.py` — shared curves, interpolation, critical override, config.
-- `fan_controller.py` — controller logic and JSON-RPC dispatch methods.
-- `fan_rpc.py` — Unix-socket JSON-RPC server and client.
-- `fan_diagnostics.py` — system and hardware diagnostics.
-- `fan_gtk.py` — unprivileged GTK4 + WebKitGTK 6 dashboard and tray.
-- `fan-gui.py` — entry point (`--demo`, `--tray`, `--headless-smoke`).
-- `fan-daemon.py` — systemd background control service and sole EC owner.
-- `fan-ctl.py` — CLI client communicating with the daemon over the socket.
-- `ui/` — React + Vite dashboard loaded from `fancontrol://app/`.
+- `fan_backend.py`: hardware backends.
+- `fan_policy.py`: versioned configuration, migration, validation, and curve math.
+- `fan_engine.py` and `fan_rules.py`: pure control decisions, rules, and schedules.
+- `fan_history.py`: SQLite persistence, query aggregation, and memory fallback.
+- `fan_controller.py`: controller logic and JSON-RPC dispatch methods.
+- `fan_rpc.py`: Unix-socket JSON-RPC server and client.
+- `fan_diagnostics.py`: system and hardware diagnostics.
+- `fan_gtk.py`: unprivileged GTK4 + WebKitGTK 6 workspace and tray.
+- `fan-gui.py`: entry point (`--demo`, `--tray`, `--headless-smoke`).
+- `fan-daemon.py`: systemd background control service and sole EC owner.
+- `fan-ctl.py`: CLI client communicating with the daemon over the socket.
+- `ui/`: React + Vite workspace loaded from `fancontrol://app/`.
 
 ## Troubleshooting
 
@@ -278,3 +302,55 @@ changes. Security issues should follow [SECURITY.md](SECURITY.md).
 Clevo and Tongfang names are used only to describe hardware compatibility.
 All product names and trademarks belong to their respective owners. This
 repository provides no manufacturer warranty, certification, or support.
+
+## v2 workspace and CLI
+
+Overview shows temperatures, fan response, and effective policy. Fans edits
+independent policies and runs expiring tests. Curves edits reusable curves
+with local previews and explicit Save. Sensors selects control sources and
+history pins. Analytics queries persisted history. Automation tests rules and
+edits schedules. Settings contains safety and display preferences. Diagnostics
+explains individual writes and exports a report.
+
+`Ctrl+K` opens page and control commands. In Manual mode, `[` and `]` adjust
+the first fan target in 5% steps, following the configured legacy linking.
+Curve points support arrow keys and Delete as well as pointer dragging.
+
+```bash
+fan-ctl capabilities --json
+fan-ctl fans list --json
+fan-ctl fans configure fan1 'control={"type":"manual","target":45}' min_duty=20 max_duty=90
+fan-ctl fans test fan1 delta=10 duration_ms=5000
+fan-ctl curves list
+fan-ctl curves assign fan1 cpu_default
+fan-ctl sensors list
+fan-ctl rules list
+fan-ctl rules test gpu_warm
+fan-ctl rules disable gpu_warm
+fan-ctl history stats
+fan-ctl history query max_points=600 'fans=["fan1"]'
+fan-ctl diagnostics --json
+```
+
+History defaults to `/var/lib/fan-control/history.db` with seven-day retention.
+Command execution through automation is not included. Package version 2.0.0
+uses epoch 1 so it sorts after the previous calendar-version packages.
+
+### v2 verification
+
+```bash
+make test
+ruff check .
+python3 scripts/check_versions.py
+xvfb-run -a python3 scripts/gtk-smoke.py
+python3 scripts/ui-demo.py
+# In another terminal, with Chromium, chromedriver, and Python Selenium installed:
+python3 scripts/ui-acceptance.py
+```
+
+The acceptance harness uses isolated simulated hardware and produces
+screenshots under `docs/images/v2`. It is not the application's runtime
+transport. The native application continues to use the local Unix socket.
+
+![Overview with simulated telemetry](docs/images/v2/overview-dark.png)
+![Curve Studio in light mode](docs/images/v2/curves-light.png)

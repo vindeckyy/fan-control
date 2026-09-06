@@ -1,7 +1,7 @@
 {
   "name": "fan-control-ui",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,9 @@
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "uplot": "^1.6.31"
+    "react-router-dom": "^7.18.3",
+    "uplot": "^1.6.31",
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",

@@ -10,16 +10,40 @@ reply per line: ``{"method": ..., "params": {...}}`` ->
 
 from __future__ import annotations
 
+import errno
 import grp
 import json
 import os
 import socket
 import threading
+import weakref
 
 SOCKET_NAME = "control.sock"
 MAX_MESSAGE = 1 << 20
 SOCKET_GROUP = "fan-control"
 ACCEPT_TIMEOUT = 0.5
+SOCKET_TIMEOUT = 10.0
+
+# Stable machine-readable error codes (RPC v2). The frontend branches on the
+# code, never on the human-readable message.
+INVALID_ARGUMENT = "INVALID_ARGUMENT"
+NOT_FOUND = "NOT_FOUND"
+REVISION_CONFLICT = "REVISION_CONFLICT"
+UNSUPPORTED = "UNSUPPORTED"
+BACKEND_ERROR = "BACKEND_ERROR"
+PERMISSION_DENIED = "PERMISSION_DENIED"
+CONFIG_ERROR = "CONFIG_ERROR"
+HISTORY_UNAVAILABLE = "HISTORY_UNAVAILABLE"
+INTERNAL = "INTERNAL"
+
+
+class RpcError(RuntimeError):
+    """Error carrying a stable machine-readable code plus a message."""
+
+    def __init__(self, message, code=INVALID_ARGUMENT):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def control_socket_path(runtime_dir):
@@ -50,22 +74,37 @@ def _read_line(sock, limit=MAX_MESSAGE):
     """Read one newline-terminated frame.
 
     Returns ``None`` on EOF; raises ``_FrameTooLarge`` when the frame
-    exceeds ``limit`` without a newline.
+    exceeds ``limit`` without a newline. Bytes after the newline are kept
+    in a per-socket buffer so pipelined requests are not lost.
     """
-    buf = bytearray()
+    buf = _pending_buffer(sock)
     while True:
+        nl = buf.find(b"\n")
+        if nl != -1:
+            line = bytes(buf[:nl])
+            del buf[:nl + 1]
+            if len(line) > limit:
+                raise _FrameTooLarge()
+            return line
+        if len(buf) > limit:
+            raise _FrameTooLarge()
         chunk = sock.recv(4096)
         if not chunk:
             return None
-        nl = chunk.find(b"\n")
-        if nl != -1:
-            buf.extend(chunk[:nl])
-            if len(buf) > limit:
-                raise _FrameTooLarge()
-            return bytes(buf)
         buf.extend(chunk)
-        if len(buf) > limit:
+        if len(buf) > limit and buf.find(b"\n") == -1:
             raise _FrameTooLarge()
+
+
+def _pending_buffer(sock):
+    """Per-socket leftover buffer; falls back to ephemeral on odd sockets."""
+    try:
+        return _READ_BUFFERS.setdefault(sock, bytearray())
+    except TypeError:
+        return bytearray()
+
+
+_READ_BUFFERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 class RpcServer:
@@ -86,6 +125,7 @@ class RpcServer:
             if os.path.exists(self.socket_path):
                 probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
+                    probe.settimeout(ACCEPT_TIMEOUT)
                     probe.connect(self.socket_path)
                     raise OSError(
                         f"control socket {self.socket_path} is already served by another process"
@@ -97,6 +137,11 @@ class RpcServer:
                         os.unlink(self.socket_path)
                     except FileNotFoundError:
                         pass
+                except PermissionError as exc:
+                    raise OSError(
+                        f"cannot probe control socket {self.socket_path}: permission denied; "
+                        f"check that the runtime directory is owned accessibly ({SOCKET_GROUP} group?)"
+                    ) from exc
                 finally:
                     probe.close()
             sock.bind(self.socket_path)
@@ -122,7 +167,9 @@ class RpcServer:
                 conn, _addr = self._sock.accept()
             except TimeoutError:
                 continue
-            except OSError:
+            except OSError as exc:
+                if exc.errno in (errno.EINTR, errno.EAGAIN, errno.EWOULDBLOCK, errno.ECONNABORTED):
+                    continue
                 break
             threading.Thread(
                 target=self._serve_connection, args=(conn,), daemon=True
@@ -166,8 +213,21 @@ class RpcServer:
                         raise ValueError("params must be an object")
                     result = self.controller.handle(payload["method"], params)
                     self._reply(conn, {"ok": True, "result": result})
+                except RpcError as exc:
+                    self._reply(conn, {
+                        "ok": False,
+                        "error": {"code": exc.code, "message": str(exc)},
+                    })
+                except (TypeError, ValueError) as exc:  # noqa: BLE001 - reported to the client
+                    self._reply(conn, {
+                        "ok": False,
+                        "error": {"code": INVALID_ARGUMENT, "message": str(exc)},
+                    })
                 except Exception as exc:  # noqa: BLE001 - reported to the client
-                    self._reply(conn, {"ok": False, "error": str(exc)})
+                    self._reply(conn, {
+                        "ok": False,
+                        "error": {"code": INTERNAL, "message": str(exc)},
+                    })
 
     @staticmethod
     def _reply(conn, payload):
@@ -230,6 +290,7 @@ class RpcClient:
                 "fan-control group (sudo usermod -aG fan-control $USER) and "
                 "re-login, or run the dashboard as root"
             ) from exc
+        sock.settimeout(SOCKET_TIMEOUT)
         self._sock = sock
 
     def call(self, method, params=None):
@@ -254,11 +315,20 @@ class RpcClient:
             raise ConnectionError("oversized reply from fan-daemon") from exc
         if reply is None:
             raise ConnectionError("fan-daemon closed the connection")
-        payload = json.loads(reply.decode("utf-8"))
+        try:
+            payload = json.loads(reply.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ConnectionError("malformed reply from fan-daemon") from exc
         if not isinstance(payload, dict):
             raise ConnectionError("malformed reply from fan-daemon")
         if not payload.get("ok"):
-            raise RuntimeError(str(payload.get("error", "unknown error")))
+            error = payload.get("error")
+            if isinstance(error, dict):
+                raise RpcError(
+                    str(error.get("message", "unknown error")),
+                    str(error.get("code", "UNKNOWN")),
+                )
+            raise RuntimeError(str(error or "unknown error"))
         return payload.get("result")
 
     def close(self):

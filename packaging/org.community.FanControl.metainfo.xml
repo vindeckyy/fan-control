@@ -11,6 +11,9 @@
       for compatible Clevo/Tongfang systems. This is an unofficial community
       project and is not affiliated with Clevo or Tongfang.
     </p>
+    <p>Version 2 provides independent fan policies, reusable curves, sensor
+    selection, telemetry history, automation rules, weekly schedules, and
+    decision diagnostics in an eight-page desktop workspace.</p>
   </description>
   <launchable type="desktop-id">fan-control.desktop</launchable>
   <categories>
@@ -18,6 +21,6 @@
     <category>HardwareSettings</category>
   </categories>
   <releases>
-    <release version="2026.9.1" date="2026-09-03"/>
+    <release version="2.0.0" date="2026-09-05"/>
   </releases>
 </component>

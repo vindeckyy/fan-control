@@ -35,10 +35,18 @@ def run_command(argv):
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
         "cmd",
-        choices=("status", "profile", "mode", "set", "cap", "config", "curve", "curves", "diagnose"),
+        choices=("status", "profile", "mode", "set", "cap", "config", "curve", "curves", "diagnose", "fans", "rules", "history", "sensors", "diagnostics", "capabilities"),
     )
     parser.add_argument("rest", nargs="*")
     args = parser.parse_intermixed_args(argv)
+
+    if args.cmd in ("fans", "rules", "history", "sensors", "diagnostics", "capabilities") or (
+        args.cmd == "curves" and args.rest and args.rest[0] in ("list", "assign")
+    ):
+        rdir = runtime_dir(demo=False, override=args.runtime_dir)
+        with RpcClient(control_socket_path(rdir)) as client:
+            data = _v2_command(client, args.cmd, args.rest)
+        return Result(json.dumps(data, indent=2) + "\n")
 
     def emit(data, text):
         payload = json.dumps(data, indent=2) + "\n" if args.json else text + "\n"
@@ -55,13 +63,17 @@ def run_command(argv):
     if args.cmd == "status":
         cfg = client.call("config.get")
         live = client.call("live")
+
+        def _pct(value):
+            return f"{value}%" if isinstance(value, (int, float)) and not isinstance(value, bool) else "--%"
+
         data = {
-            "profile": cfg["profile"],
-            "mode": cfg["mode"],
-            "max_duty": cfg["max_duty"],
-            "hysteresis": cfg["hysteresis"],
-            "critical_temp": cfg["critical_temp"],
-            "linked": cfg["linked"],
+            "profile": cfg.get("profile", "?"),
+            "mode": cfg.get("mode", "?"),
+            "max_duty": cfg.get("max_duty", "?"),
+            "hysteresis": cfg.get("hysteresis", "?"),
+            "critical_temp": cfg.get("critical_temp", "?"),
+            "linked": cfg.get("linked", "?"),
             "control_temp": live.get("control_temp"),
             "fan1": live.get("fan1"),
             "fan2": live.get("fan2"),
@@ -72,7 +84,7 @@ def run_command(argv):
         text = (
             f"profile {data['profile']}  mode {data['mode']}  "
             f"cap {data['max_duty']}%  hysteresis {data['hysteresis']}  critical {data['critical_temp']}°C  linked {data['linked']}\n"
-            f"control_temp {ctrl}  fan1 {data['fan1']}%  fan2 {data['fan2']}%  daemon_reachable {data['daemon_reachable']}"
+            f"control_temp {ctrl}  fan1 {_pct(data['fan1'])}  fan2 {_pct(data['fan2'])}  daemon_reachable {data['daemon_reachable']}"
         )
         return emit(data, text)
 
@@ -186,7 +198,50 @@ def run_command(argv):
     raise SystemExit("unknown command")
 
 
+def _v2_command(client, command, rest):
+    def options(items):
+        result = {}
+        for item in items:
+            if "=" not in item:
+                raise SystemExit("options must be key=value; use JSON for control objects and arrays")
+            key, value = item.split("=", 1)
+            try:
+                result[key] = json.loads(value)
+            except ValueError:
+                result[key] = value
+        return result
+
+    if command in ("diagnostics", "capabilities"):
+        return client.call("diagnostics.snapshot" if command == "diagnostics" else command)
+    sub = rest[0] if rest else "list"
+    if command == "fans" and sub in ("configure", "test"):
+        if len(rest) < 2:
+            raise SystemExit(f"usage: fan-ctl fans {sub} fan1 key=value ...")
+        return client.call(f"fans.{sub}", {"fan": rest[1], **options(rest[2:])})
+    if command == "curves" and sub == "assign":
+        if len(rest) != 3:
+            raise SystemExit("usage: fan-ctl curves assign fan1 curve_id")
+        return client.call("curves.assign", {"fan": rest[1], "curve_ref": rest[2]})
+    if command == "rules" and sub in ("test", "enable", "disable"):
+        if len(rest) != 2:
+            raise SystemExit(f"usage: fan-ctl rules {sub} rule_id")
+        if sub == "test":
+            return client.call("rules.test", {"id": rest[1]})
+        listing = client.call("rules.list")
+        rule = next((r for r in listing["rules"] if r["id"] == rest[1]), None)
+        if rule is None:
+            raise SystemExit(f"unknown rule {rest[1]!r}")
+        rule["enabled"] = sub == "enable"
+        return client.call("rules.set", {"rule": rule, "expected_revision": listing["config_revision"]})
+    if command == "history" and sub in ("query", "stats"):
+        return client.call(f"history.{sub}", options(rest[1:]))
+    if sub == "list" and command in ("fans", "curves", "rules", "sensors"):
+        return client.call(f"{command}.list")
+    raise SystemExit(f"unknown {command} operation {sub!r}")
+
+
 def main():
+    use_json = "--json" in sys.argv
     try:
         result = run_command(sys.argv[1:])
     except SystemExit as exc:
@@ -200,7 +255,11 @@ def main():
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
     except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        code = getattr(exc, "code", None)
+        if use_json:
+            sys.stdout.write(json.dumps({"ok": False, "code": code or "ERROR", "message": str(exc)}) + "\n")
+        else:
+            print(f"error [{code}] {exc}" if code else f"error: {exc}", file=sys.stderr)
         sys.exit(1)
     if result.stdout:
         sys.stdout.write(result.stdout)

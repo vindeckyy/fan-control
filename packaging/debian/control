@@ -4,7 +4,8 @@ Priority: optional
 Maintainer: Fan Control Community <fan-control@community.org>
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13),
-               nodejs,
+               dh-python,
+               nodejs (>= 20),
                npm,
                python3
 Standards-Version: 4.6.2

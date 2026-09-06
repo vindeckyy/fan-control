@@ -26,8 +26,47 @@ from fan_runtime import ExclusiveLock, runtime_dir
 CONFIG_DEFAULT = os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json")
 
 
+def _tick_loop(controller, stopped, interval, label="fan daemon"):
+    """Run one control iteration; never let a single tick kill the daemon."""
+    failures = 0
+    while not stopped():
+        try:
+            controller.tick_sensors()
+        except Exception as exc:  # noqa: BLE001 - telemetry must not stop control
+            failures += 1
+            print(f"{label}: sensor tick failed ({exc})", flush=True)
+        try:
+            controller.tick_readback()
+        except Exception as exc:  # noqa: BLE001 - keep last readback, keep controlling
+            failures += 1
+            print(f"{label}: readback tick failed ({exc})", flush=True)
+        decision = None
+        try:
+            decision = controller.tick_control()
+            failures = 0
+        except Exception as exc:  # noqa: BLE001 - control faults stay visible
+            failures += 1
+            print(f"{label}: control tick failed ({exc})", flush=True)
+        try:
+            controller.tick_history()
+        except Exception as exc:  # noqa: BLE001 - history must never halt control
+            print(f"{label}: history tick failed ({exc})", flush=True)
+        if failures >= 20:
+            print(f"{label}: too many consecutive tick failures; exiting", flush=True)
+            break
+        yield decision
+        try:
+            time.sleep(interval)
+        except (OSError, OverflowError):
+            break
+
+
 def run(args):
     rdir = runtime_dir(demo=args.dry_run, override=args.runtime_dir)
+    data_dir = getattr(args, "data_dir", None) or (
+        os.environ.get("FAN_CONTROL_DATA_DIR")
+        or (str(rdir) if args.dry_run else "/var/lib/fan-control")
+    )
 
     if args.dry_run:
         controller = FanController(
@@ -36,6 +75,7 @@ def run(args):
             runtime_dir=rdir,
             demo=True,
             fan_limit=args.fans,
+            data_dir=data_dir,
         )
         stopped = False
 
@@ -48,17 +88,12 @@ def run(args):
 
         print(f"fan daemon: backend=demo, interval={args.interval}s (dry-run)", flush=True)
         try:
-            while not stopped:
-                controller.tick_sensors()
-                controller.tick_readback()
-                decision = controller.tick_control()
-                controller.tick_history()
+            for decision in _tick_loop(controller, lambda: stopped, args.interval):
                 ctrl = controller.control_temp()
                 print(
-                    f"{ctrl if ctrl is not None else '--'}°C -> {decision.duties or decision.writes}",
+                    f"{ctrl if ctrl is not None else '--'}°C -> {(decision.duties or decision.writes) if decision else {}}",
                     flush=True,
                 )
-                time.sleep(args.interval)
         finally:
             controller.close()
         return
@@ -76,6 +111,7 @@ def run(args):
             config_path=args.config,
             runtime_dir=rdir,
             fan_limit=args.fans,
+            data_dir=data_dir,
         )
         server = RpcServer(controller, rdir / "control.sock")
         server.start()
@@ -101,12 +137,15 @@ def run(args):
             f"fan daemon: backend={backend.name}, socket={server.socket_path}, interval={args.interval}s",
             flush=True,
         )
-        while not stopped:
-            controller.tick_sensors()
-            controller.tick_readback()
-            controller.tick_control()
-            controller.tick_history()
-            time.sleep(args.interval)
+        present = controller.fans()
+        if args.fans is not None and any(f > args.fans for f in present):
+            print(
+                f"fan daemon: backend offers fans {present} but --fans={args.fans} hides "
+                f"{sorted(f for f in present if f > args.fans)}",
+                flush=True,
+            )
+        for _decision in _tick_loop(controller, lambda: stopped, args.interval):
+            pass
     finally:
         if server is not None:
             try:
@@ -131,6 +170,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="print decisions without opening the EC device")
     parser.add_argument("--diagnose", action="store_true", help="print system state and exit (no EC access)")
     parser.add_argument("--runtime-dir", help="override /run/fan-control")
+    parser.add_argument("--data-dir", help="override /var/lib/fan-control (history database location)")
     args = parser.parse_args()
 
     if args.diagnose:

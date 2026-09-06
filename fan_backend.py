@@ -170,10 +170,19 @@ class TuxedoIoBackend(FanBackend):
         return self.CLEVO_NATIVE_MAX if getattr(self, "is_clevo", False) else self.NATIVE_MAX
 
     def _pct_to_raw(self, percent):
-        return round(int(percent) * self.native_max / MAX_DUTY_PERCENT)
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            pct = 0
+        pct = max(0.0, min(float(MAX_DUTY_PERCENT), pct))
+        return round(pct * self.native_max / MAX_DUTY_PERCENT)
 
     def _raw_to_pct(self, raw):
-        return round(int(raw) * MAX_DUTY_PERCENT / self.native_max)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0
+        return round(value * MAX_DUTY_PERCENT / self.native_max)
 
     def _read(self, command):
         buf = ctypes.c_int32()
@@ -185,6 +194,8 @@ class TuxedoIoBackend(FanBackend):
         fcntl.ioctl(self.fd, command, buf, True)
 
     def fans(self):
+        if getattr(self, "is_clevo", False):
+            return [1, 2, 3]
         return [1, 2]
 
     def lock(self):
@@ -206,7 +217,11 @@ class TuxedoIoBackend(FanBackend):
                 fcntl.ioctl(self.fd, W_UW_FANAUTO)
 
     def write_duty(self, fan, percent):
-        percent = max(0, min(MAX_DUTY_PERCENT, int(percent)))
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            raise FanBackendError(f"invalid duty {percent!r}") from None
+        percent = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
         with self._lock:
             self._duties[fan] = percent
             if getattr(self, "is_clevo", False):
@@ -251,12 +266,17 @@ class TuxedoIoBackend(FanBackend):
 
     def _hold_loop(self):
         stop = self._hold_stop
+        failures = 0
         while not stop.wait(UNIWILL_HOLD_INTERVAL):
             try:
                 with self._lock:
                     self._commit_uniwill_duties()
             except (OSError, FanBackendError):
-                break
+                failures += 1
+                if failures >= 5:
+                    break
+                continue
+            failures = 0
 
     def ping(self):
         with self._lock:
@@ -282,10 +302,14 @@ class TuxedoIoBackend(FanBackend):
         """Best-effort hardware readback; may be noisy or laggy on tuxedo_io."""
         with self._lock:
             if getattr(self, "is_clevo", False):
-                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1] if fan in (1, 2, 3) else R_CL_FANINFO1
+                if fan not in (1, 2, 3):
+                    raise FanBackendError(f"unknown fan {fan!r}") from None
+                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1]
                 raw = self._read(cmd) & 0xFF
                 return round(raw * MAX_DUTY_PERCENT / self.CLEVO_NATIVE_MAX)
-            cmd = (R_UW_FANSPEED, R_UW_FANSPEED2)[fan - 1] if fan in (1, 2) else R_UW_FANSPEED
+            if fan not in (1, 2):
+                raise FanBackendError(f"unknown fan {fan!r}") from None
+            cmd = (R_UW_FANSPEED, R_UW_FANSPEED2)[fan - 1]
             return self._raw_to_pct(self._read(cmd) & 0xFF)
 
     def read_temp(self):
@@ -318,9 +342,11 @@ class TuxedoIoBackend(FanBackend):
         # Uniwill tach is unverified; never probe those registers.
         if not getattr(self, "is_clevo", False):
             return None
+        if fan not in (1, 2, 3):
+            raise FanBackendError(f"unknown fan {fan!r}") from None
         try:
             with self._lock:
-                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1] if fan in (1, 2, 3) else R_CL_FANINFO1
+                cmd = (R_CL_FANINFO1, R_CL_FANINFO2, R_CL_FANINFO3)[fan - 1]
                 rpm = (self._read(cmd) >> 16) & 0xFFFF
                 return int(rpm) if 0 < rpm < 30000 else None
         except OSError:
@@ -328,9 +354,13 @@ class TuxedoIoBackend(FanBackend):
 
     def close(self):
         self._stop_hold_thread()
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        fd, self.fd = self.fd, None
+        if fd is None:
+            return
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 class ClevoAcpiBackend(FanBackend):
@@ -378,12 +408,34 @@ class ClevoAcpiBackend(FanBackend):
         except OSError:
             pass
 
+    @staticmethod
+    def _fan_index(fan):
+        try:
+            text = str(fan).strip().removeprefix("fan")
+            index = int(text)
+        except (TypeError, ValueError):
+            raise FanBackendError(f"unknown fan {fan!r}") from None
+        if index not in (1, 2, 3):
+            raise FanBackendError(f"unknown fan {fan!r}") from None
+        return index
+
     def write_duty(self, fan, percent):
-        value = max(0, min(MAX_DUTY_PERCENT, int(percent)))
-        self._write(f"fan{fan}_manual_duty", value)
+        index = self._fan_index(fan)
+        if index not in self._fans:
+            raise FanBackendError(f"fan {index} not present under {self.base}")
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            raise FanBackendError(f"invalid duty {percent!r}") from None
+        value = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
+        self._write(f"fan{index}_manual_duty", value)
 
     def read_duty(self, fan):
-        return int((self.base / f"fan{fan}_duty").read_text().strip())
+        index = self._fan_index(fan)
+        try:
+            return int((self.base / f"fan{index}_duty").read_text().strip())
+        except (OSError, ValueError) as exc:
+            raise FanBackendError(f"cannot read fan{index} duty: {exc}") from exc
 
     def read_temp(self):
         try:
@@ -398,7 +450,8 @@ class ClevoAcpiBackend(FanBackend):
             return None
 
     def read_rpm(self, fan):
-        path = self.base / f"fan{fan}_rpm"
+        index = self._fan_index(fan)
+        path = self.base / f"fan{index}_rpm"
         if not path.exists():
             return None
         try:
@@ -418,7 +471,7 @@ class DemoBackend(FanBackend):
     name = "demo"
 
     def __init__(self):
-        self._duty = {1: 0, 2: 0}
+        self._duty = {1: 0, 2: 0, 3: 0}
 
     def fans(self):
         return [1, 2]
@@ -430,10 +483,21 @@ class DemoBackend(FanBackend):
         pass
 
     def write_duty(self, fan, percent):
-        self._duty[fan] = max(0, min(MAX_DUTY_PERCENT, int(percent)))
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            return
+        try:
+            key = int(fan)
+        except (TypeError, ValueError):
+            return
+        self._duty[key] = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
 
     def read_duty(self, fan):
-        return self._duty[fan]
+        try:
+            return int(self._duty.get(int(fan), 0))
+        except (TypeError, ValueError):
+            return 0
 
     def read_temp(self):
         return round(62 + 10 * math.sin(time.monotonic() / 18))
@@ -481,6 +545,8 @@ def detect_backend(backend=None, device=None):
     override) prefers clevo-acpi sysfs when present, else tuxedo_io.
     """
     backend = backend or os.environ.get("FAN_CONTROL_BACKEND") or "auto"
+    if isinstance(backend, str):
+        backend = backend.strip().lower()
     if backend not in ("auto", "tuxedo_io", "clevo_acpi"):
         raise FanBackendError(
             f"unknown backend {backend!r}; expected auto, tuxedo_io, or clevo_acpi"

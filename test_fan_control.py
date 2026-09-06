@@ -18,6 +18,8 @@ ROOT = pathlib.Path(__file__).parent
 
 
 def load(name, filename):
+    if name in sys.modules:
+        return sys.modules[name]
     spec = importlib.util.spec_from_file_location(name, ROOT / filename)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -950,13 +952,21 @@ class ControllerExtendedTests(unittest.TestCase):
         self.ctl.tick_readback()
         decision = self.ctl.tick_control()
         self.assertIsNotNone(decision)
-        # Simulate fault threshold
-        with mock.patch.object(self.ctl, "cpu_temp", return_value=None), \
-             mock.patch.object(self.ctl, "gpu_temp", return_value=None):
+        # Simulate fault threshold: no valid sensor records and no EC fallback
+        with self.ctl.lock:
+            saved_records = self.ctl._sensor_records
+            saved_readback = dict(self.ctl._readback)
+            self.ctl._sensor_records = []
+            self.ctl._readback = dict(saved_readback, ec_temp1=0, ec_temp2=0)
             self.ctl._missing = 3
+        try:
             decision = self.ctl.tick_control()
             self.assertEqual(decision.action, "release")
             self.assertTrue(self.ctl._released_for_fault)
+        finally:
+            with self.ctl.lock:
+                self.ctl._sensor_records = saved_records
+                self.ctl._readback = saved_readback
         # Recover with valid temperature
         self.ctl._missing = 0
         decision = self.ctl.tick_control()

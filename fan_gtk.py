@@ -24,7 +24,7 @@ from gi.repository import JavaScriptCore as JSC
 
 from fan_backend import DemoBackend
 from fan_controller import FanController
-from fan_rpc import RpcClient, control_socket_path
+from fan_rpc import RpcClient, RpcError, control_socket_path
 from fan_runtime import runtime_dir
 
 APP_ID = "org.community.FanControl"
@@ -39,6 +39,11 @@ INJECT = r"""
       }
       const payload = {method: method, params: params || {}};
       const raw = await webkit.messageHandlers.fan.postMessage(payload);
+      if (raw && typeof raw === "object" && raw.__fan_error) {
+        const err = new Error(raw.__fan_error.message || "daemon error");
+        err.code = raw.__fan_error.code || "UNKNOWN";
+        throw err;
+      }
       if (raw && typeof raw === "object" && raw.error) throw new Error(raw.error);
       return raw;
     },
@@ -103,9 +108,12 @@ class FanApplication(Gtk.Application):
             return
         try:
             self._setup_controller()
-        except Exception as exc:
-            self._fatal_window(str(exc))
-            return
+        except (ConnectionError, PermissionError, RuntimeError, OSError) as exc:
+            if self.args.demo:
+                self._fatal_window(str(exc))
+                return
+            print(f"controller setup failed ({exc}); falling back to RPC client", flush=True)
+            self._rpc = _RpcClientAdapter(RpcClient(control_socket_path(self.runtime)))
         self._build_window()
         self._start_loops()
         GLib.timeout_add(500, self._push_live)
@@ -141,7 +149,10 @@ class FanApplication(Gtk.Application):
             try:
                 client.connect()
             except ConnectionError:
-                subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True)
+                try:
+                    subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError):
+                    pass
                 for _ in range(20):
                     time.sleep(0.5)
                     try:
@@ -158,8 +169,8 @@ class FanApplication(Gtk.Application):
             self._rpc = _RpcClientAdapter(client)
     def _build_window(self):
         window = Gtk.ApplicationWindow(application=self, title="Fan Control")
-        window.set_default_size(1100, 760)
-        window.set_size_request(900, 640)
+        window.set_default_size(1280, 800)
+        window.set_size_request(720, 480)
         header = Gtk.HeaderBar()
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         title = Gtk.Label(label="Fan Control")
@@ -175,6 +186,9 @@ class FanApplication(Gtk.Application):
         window.set_titlebar(header)
 
         context = WebKit.WebContext.new()
+        languages = [name.split(".")[0].replace("_", "-") for name in GLib.get_language_names()
+                     if name.split(".")[0] not in ("C", "POSIX")]
+        context.set_preferred_languages(languages or ["en-US"])
         security = context.get_security_manager()
         security.register_uri_scheme_as_secure(SCHEME)
         security.register_uri_scheme_as_local(SCHEME)
@@ -253,6 +267,14 @@ class FanApplication(Gtk.Application):
             mime = "text/javascript"
         self._serve_bytes(request, data, mime)
 
+    READONLY_METHODS = frozenset((
+        "snapshot", "live", "history", "history.export", "diagnose",
+        "config.get", "curves.list", "curves.export", "capabilities",
+        "fans.list", "sensors.list", "rules.list", "schedule.get",
+        "history.query", "history.stats",
+        "diagnostics.snapshot", "diagnostics.decisions",
+    ))
+
     def _on_message(self, _ucm, js_value, reply):
         try:
             payload = json.loads(js_value.to_json(0))
@@ -260,7 +282,13 @@ class FanApplication(Gtk.Application):
                 raise ValueError("message must be an object")
             method = payload.get("method")
             params = payload.get("params") or {}
-            if method in ("history.pick_export", "curves.pick_export", "curves.pick_import"):
+            if method == "diagnostics.copy":
+                self.window.get_clipboard().set(self._diagnostic_export())
+                ctx = js_value.get_context()
+                reply.return_value(JSC.Value.new_from_json(ctx, '{"ok":true}'))
+                self._eval_event("toast", {"message": "Diagnostics copied"})
+                return
+            if method in ("history.pick_export", "curves.pick_export", "curves.pick_import", "diagnostics.pick_export"):
                 GLib.idle_add(self._file_op, method, params)
                 ctx = js_value.get_context()
                 reply.return_value(JSC.Value.new_from_json(ctx, json.dumps({"ok": True, "async": True})))
@@ -268,24 +296,55 @@ class FanApplication(Gtk.Application):
             result = self._rpc.handle(method, params)
             ctx = js_value.get_context()
             reply.return_value(JSC.Value.new_from_json(ctx, json.dumps(result, default=str)))
-            if method not in ("snapshot", "history", "history.export", "diagnose", "curves.list", "curves.export"):
+            if method not in self.READONLY_METHODS:
                 GLib.idle_add(self._push_full)
+        except RpcError as exc:
+            ctx = js_value.get_context()
+            structured = json.dumps({
+                "__fan_error": {"code": exc.code, "message": str(exc)},
+            })
+            reply.return_value(JSC.Value.new_from_json(ctx, structured))
+            if self.args.debug:
+                traceback.print_exc()
         except Exception as exc:
             reply.return_error_message(str(exc))
             if self.args.debug:
                 traceback.print_exc()
 
     def _file_op(self, method, params):
+        if not hasattr(Gtk, "FileDialog"):
+            self._eval_event("toast", {"message": "File dialogs need GTK 4.10 or newer"})
+            return False
         dialog = Gtk.FileDialog()
         if method == "history.pick_export":
             dialog.set_initial_name("fan-history.csv")
             dialog.save(self.window, None, lambda d, res: self._save_csv(d, res))
+        elif method == "diagnostics.pick_export":
+            dialog.set_initial_name("fan-diagnostics.json")
+            dialog.save(self.window, None, lambda d, res: self._save_diagnostics(d, res))
         elif method == "curves.pick_export":
             dialog.set_initial_name(f"{params.get('name', 'curve')}.json")
             dialog.save(self.window, None, lambda d, res: self._save_curve(d, res, params))
         else:
             dialog.open(self.window, None, lambda d, res: self._open_curve(d, res))
         return False
+
+    def _diagnostic_export(self):
+        data = self._rpc.handle("diagnostics.snapshot", {})
+        data["daemon"].pop("config_path", None)
+        data.get("history", {}).pop("path", None)
+        data.pop("sensors", None)
+        return json.dumps(data, indent=2, default=str)
+
+    def _save_diagnostics(self, dialog, result):
+        try:
+            file = dialog.save_finish(result)
+            file.replace_contents(self._diagnostic_export().encode(), None, False, Gio.FileCreateFlags.NONE, None)
+            self._eval_event("toast", {"message": "Diagnostics exported"})
+        except GLib.Error:
+            pass
+        except Exception as exc:
+            self._eval_event("toast", {"message": str(exc)})
 
     def _save_csv(self, dialog, result):
         try:
@@ -315,7 +374,7 @@ class FanApplication(Gtk.Application):
             _ok, contents, _etag = file.load_contents()
             data = json.loads(contents)
             name = data.get("name") or pathlib.Path(file.get_basename()).stem
-            self._rpc.handle("curves.save", {"name": name, "curve": data.get("curve")})
+            self._rpc.handle("curves.set", {"name": name, "points": data.get("points") or data.get("curve"), "temp_source": data.get("temp_source", "max")})
             self._eval_event("toast", {"message": f"Imported {name}"})
             self._push_full()
         except GLib.Error:
@@ -403,13 +462,20 @@ class FanApplication(Gtk.Application):
         temp = snap.get("control_temp")
         critical = snap.get("critical_temp", 95)
         enabled = (snap.get("alerts") or {}).get("desktop")
-        if temp is not None and temp >= critical and enabled and not self._notified_critical:
+        if temp is not None and temp >= critical and enabled and snap.get("critical_alerts", True) and not self._notified_critical:
             self._notified_critical = True
             notification = Gio.Notification.new("Fan Control")
             notification.set_body(f"Critical control temperature: {temp:.1f}°C. Maximum cooling engaged.")
             self.send_notification("critical-temp", notification)
         if temp is not None and temp < critical - 5:
             self._notified_critical = False
+        last = getattr(self, "_last_notification_seq", 0)
+        for event in snap.get("notifications", []):
+            if event["seq"] > last and enabled:
+                notification = Gio.Notification.new("Fan Control automation")
+                notification.set_body(event["message"])
+                self.send_notification("rule-" + event["rule"], notification)
+            self._last_notification_seq = max(getattr(self, "_last_notification_seq", 0), event["seq"])
 
     def _start_loops(self):
         if not self.controller:
@@ -454,7 +520,7 @@ class FanApplication(Gtk.Application):
 
 
 class TrayApplication(Gtk.Application):
-    """Display-only tray: never locks the EC. Profile changes SIGHUP the daemon."""
+    """Tray client; all cooling changes pass through the daemon RPC."""
 
     INTROSPECT = """
     <node>
@@ -467,6 +533,8 @@ class TrayApplication(Gtk.Application):
         <property name="IconName" type="s" access="read"/>
         <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
         <property name="ItemIsMenu" type="b" access="read"/>
+        <signal name="NewToolTip"/>
+        <signal name="NewIcon"/>
         <method name="ContextMenu"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
         <method name="Activate"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
         <method name="SecondaryActivate"><arg type="i" name="x" direction="in"/><arg type="i" name="y" direction="in"/></method>
@@ -483,6 +551,10 @@ class TrayApplication(Gtk.Application):
         self.popover = None
         self._bus = None
         self._registration = None
+        self._live = {}
+        self._syncing_menu = False
+        self._profile_buttons = {}
+        self._mode_buttons = {}
 
     def do_activate(self):
         if self.popover:
@@ -490,6 +562,7 @@ class TrayApplication(Gtk.Application):
         self.hold()
         self._build_menu()
         self._export_sni()
+        GLib.timeout_add_seconds(3, self._poll)
 
     def _build_menu(self):
         popover = Gtk.Popover()
@@ -498,9 +571,23 @@ class TrayApplication(Gtk.Application):
         box.set_margin_bottom(8)
         box.set_margin_start(8)
         box.set_margin_end(8)
+        group = None
         for profile in ("silent", "balanced", "performance", "custom"):
-            button = Gtk.Button(label=profile.title())
-            button.connect("clicked", lambda _b, name=profile: self._set_profile(name))
+            button = Gtk.CheckButton(label=profile.title())
+            if group is not None:
+                button.set_group(group)
+            group = button
+            button.connect("toggled", lambda b, name=profile: self._set_profile(name) if b.get_active() and not self._syncing_menu else None)
+            self._profile_buttons[profile] = button
+            box.append(button)
+        group = None
+        for mode, label in (("curve", "Automatic"), ("manual", "Manual"), ("released", "Return to EC Auto")):
+            button = Gtk.CheckButton(label=label)
+            if group is not None:
+                button.set_group(group)
+            group = button
+            button.connect("toggled", lambda b, value=mode: self._set_mode(value) if b.get_active() and not self._syncing_menu else None)
+            self._mode_buttons[mode] = button
             box.append(button)
         open_btn = Gtk.Button(label="Open dashboard")
         open_btn.connect("clicked", lambda *_: self._open_gui())
@@ -535,6 +622,34 @@ class TrayApplication(Gtk.Application):
         extra.extend(["--config", str(self.args.config)])
         subprocess.Popen([sys.executable, sys.argv[0], *extra], start_new_session=True)
         self.popover.popdown()
+
+    def _set_mode(self, mode):
+        try:
+            with RpcClient(control_socket_path(self.runtime)) as client:
+                client.call("mode", {"mode": mode})
+        except Exception as exc:
+            notification = Gio.Notification.new("Fan Control")
+            notification.set_body(str(exc))
+            self.send_notification("error", notification)
+        self.popover.popdown()
+
+    def _poll(self):
+        try:
+            with RpcClient(control_socket_path(self.runtime)) as client:
+                self._live = client.call("live")
+            self._syncing_menu = True
+            for name, button in self._profile_buttons.items():
+                button.set_active(name == self._live.get("configured_profile", self._live.get("profile")))
+            for mode, button in self._mode_buttons.items():
+                button.set_active(mode == self._live.get("mode"))
+        except Exception:
+            self._live = {}
+        finally:
+            self._syncing_menu = False
+        if self._bus:
+            for signal in ("NewToolTip", "NewIcon"):
+                self._bus.emit_signal(None, "/StatusNotifierItem", "org.kde.StatusNotifierItem", signal, None)
+        return True
 
     def _export_sni(self):
         Gio.bus_get(Gio.BusType.SESSION, None, self._on_bus)
@@ -574,6 +689,14 @@ class TrayApplication(Gtk.Application):
             GLib.idle_add(self._popup, x, y)
         invocation.return_value(None)
 
+    @staticmethod
+    def _fmt_temp(value):
+        return f"{value}°C" if isinstance(value, (int, float)) and not isinstance(value, bool) else "--"
+
+    @staticmethod
+    def _fmt_pct(value):
+        return f"{value}%" if isinstance(value, (int, float)) and not isinstance(value, bool) else "n/a%"
+
     def _on_get_property(self, _conn, _sender, _path, _iface, name):
         values = {
             "Category": GLib.Variant("s", "Hardware"),
@@ -581,9 +704,13 @@ class TrayApplication(Gtk.Application):
             "Title": GLib.Variant("s", "Fan Control"),
             "Status": GLib.Variant("s", "Active"),
             "WindowId": GLib.Variant("i", 0),
-            "IconName": GLib.Variant("s", "fan-control"),
+            "IconName": GLib.Variant("s", "dialog-warning" if self._live.get("critical_active") else "fan-control"),
             "ItemIsMenu": GLib.Variant("b", False),
-            "ToolTip": GLib.Variant("(sa(iiay)ss)", ("fan-control", [], "Fan Control", "Display-only tray")),
+            "ToolTip": GLib.Variant("(sa(iiay)ss)", ("fan-control", [], "Fan Control", (
+                f"{self._fmt_temp(self._live.get('control_temp'))} · "
+                f"{self._live.get('effective_profile', 'Disconnected')} · "
+                f"{self._fmt_pct(self._live.get('fan1'))} / {self._fmt_pct(self._live.get('fan2'))}"
+            ))),
         }
         return values.get(name)
 

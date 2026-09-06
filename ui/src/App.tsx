@@ -1,172 +1,177 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { call, onFanEvent } from "./bridge";
-import type { HistoryPoint, Snapshot } from "./types";
-import { applyLive } from "./liveState";
-import Banners from "./components/Banners";
-import CurveStudio from "./components/CurveStudio";
-import FanCards from "./components/FanCard";
-import Hero from "./components/Hero";
-import HistoryBoard from "./components/HistoryBoard";
-import SafetyDrawer from "./components/SafetyDrawer";
-import SensorRail from "./components/SensorRail";
-import Toast from "./components/Toast";
-
-const HISTORY_CAP = 900;
-
-export default function App() {
-  const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
-  const [toast, setToast] = useState("");
-  const [diagnose, setDiagnose] = useState("");
-  const [selectedFan, setSelectedFan] = useState(1);
-  const snapRef = useRef(snap);
-  const selectedRef = useRef(selectedFan);
-  snapRef.current = snap;
-  selectedRef.current = selectedFan;
-
-  function note(message: string) {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 2200);
-  }
-
-  async function run(method: string, params: Record<string, unknown> = {}, message?: string) {
-    try {
-      const result = await call(method, params);
-      if (message) note(message);
-      return result;
-    } catch (error) {
-      note(error instanceof Error ? error.message : String(error));
-      return null;
-    }
-  }
-
-  const runRef = useRef(run);
-  runRef.current = run;
-
+import { useEffect } from "react";
+import { HashRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
+import { connect } from "./stores/connect";
+import { useConfig } from "./stores/configStore";
+import { useConnection } from "./stores/connectionStore";
+import { useLive } from "./stores/liveStore";
+import { toggleSidebar, useUI } from "./stores/uiStore";
+import { TempBadge, Skeleton } from "./components/ui";
+import Overview from "./pages/Overview";
+import Fans from "./pages/Fans";
+import Curves from "./pages/Curves";
+import Sensors from "./pages/Sensors";
+import Analytics from "./pages/Analytics";
+import Automation from "./pages/Automation";
+import Settings from "./pages/Settings";
+import Diagnostics from "./pages/Diagnostics";
+import CommandPalette from "./components/CommandPalette";
+export const pages = [
+  "Overview",
+  "Fans",
+  "Curves",
+  "Sensors",
+  "Analytics",
+  "Automation",
+  "Settings",
+  "Diagnostics",
+];
+const views = [
+  Overview,
+  Fans,
+  Curves,
+  Sensors,
+  Analytics,
+  Automation,
+  Settings,
+  Diagnostics,
+];
+function Workspace() {
+  const collapsed = useUI((s) => s.collapsed),
+    toast = useUI((s) => s.toast);
+  const config = useConfig((s) => s.config),
+    status = useConnection((s) => s.status),
+    error = useConnection((s) => s.error);
+  const live = useLive((s) => s.live);
+  useEffect(() => connect(), []);
   useEffect(() => {
-    void run("snapshot").then((value) => value && setSnap(value as Snapshot));
-    void run("history").then((value) => {
-      const payload = value as { history?: HistoryPoint[] } | null;
-      if (payload?.history) setHistory(payload.history);
-    });
-    return onFanEvent((name, payload) => {
-      if (name === "snapshot") setSnap(payload as Snapshot);
-      if (name === "live") setSnap((current) => (current ? applyLive(current, payload as Snapshot) : current));
-      if (name === "history") setHistory((payload as { history: HistoryPoint[] }).history || []);
-      if (name === "history-append") {
-        const point = payload as HistoryPoint;
-        if (!point || typeof point.time !== "number") return;
-        setHistory((current) => {
-          const last = current[current.length - 1];
-          if (last && last.time === point.time) {
-            return current.slice(0, -1).concat(point).slice(-HISTORY_CAP);
-          }
-          return current.concat(point).slice(-HISTORY_CAP);
-        });
-      }
-      if (name === "toast") note((payload as { message: string }).message);
-    });
-  }, []);
-
-  useEffect(() => {
-    const theme = snap?.theme || localStorage.getItem("fan-theme") || "dark";
-    document.documentElement.dataset.theme = theme;
-    if (window.matchMedia("(prefers-color-scheme: light)").matches && !snap?.theme && !localStorage.getItem("fan-theme")) {
-      document.documentElement.dataset.theme = "light";
-    }
-  }, [snap?.theme]);
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      const current = snapRef.current;
-      if (!current) return;
-      const runNow = runRef.current;
-      const fan = selectedRef.current;
-      const modes: Array<() => void> = [
-        () => runNow("mode", { mode: "manual" }, "Manual"),
-        () => runNow("profile", { profile: "silent" }, "Silent"),
-        () => runNow("profile", { profile: "balanced" }, "Balanced"),
-        () => runNow("profile", { profile: "performance" }, "Performance"),
-        () => runNow("profile", { profile: "custom" }, "Custom"),
-        () => runNow("mode", { mode: "released" }, "EC Auto"),
-      ];
-      if (event.key >= "1" && event.key <= "6") modes[Number(event.key) - 1]();
-      if (event.key === "e" || event.key === "E") runNow("mode", { mode: "released" }, "EC Auto");
-      if (event.key === "l" || event.key === "L") runNow("config", { linked: !current.linked }, current.linked ? "Unlinked" : "Linked");
-      if (event.key === "[" || event.key === "]") {
-        const delta = event.key === "]" ? 5 : -5;
-        const value = Number(current.targets[String(fan)] ?? 0);
-        runNow("set", { fan, pct: Math.max(0, Math.min(100, value + delta)) });
-      }
+    const media = matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      document.documentElement.dataset.theme =
+        config?.display.theme === "system"
+          ? media.matches
+            ? "light"
+            : "dark"
+          : config?.display.theme || "dark";
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  const spark = useMemo(
-    () => history.filter((p) => p.time >= Math.floor(Date.now() / 1000) - 60).map((p) => p.control_temp),
-    [history],
-  );
-
-  if (!snap) {
-    return (
-      <main className="shell">
-        <Banners snap={null} />
-        <Toast message={toast} />
-      </main>
-    );
-  }
-
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [config?.display.theme]);
   return (
-    <main className="shell">
-      <Banners snap={snap} />
-      <div className="grid">
-        <div>
-          <Hero
-            snap={snap}
-            spark={spark}
-            onMode={(mode) => run("mode", { mode }, mode)}
-            onProfile={(profile) => run("profile", { profile }, profile)}
-          />
-          <FanCards
-            snap={snap}
-            selected={selectedFan}
-            onSelect={setSelectedFan}
-            onSet={(fan, pct) => run("set", { fan, pct })}
-            onLinked={(linked) => run("config", { linked }, linked ? "Fans linked" : "Fans unlinked")}
-          />
-        </div>
-        <SensorRail
-          snap={snap}
-          onPin={(kind, pin) => run("config", { [kind]: pin }, pin ? `Pinned ${kind}` : "Pin cleared")}
-        />
-        <HistoryBoard history={history} snap={snap} onExport={() => run("history.pick_export")} />
-        <CurveStudio
-          snap={snap}
-          onApply={(curve, which) => run("custom", { curve, which }, "Custom curve active")}
-          onSaveNamed={(name, curve) => run("curves.save", { name, curve }, `Saved ${name}`)}
-          onLoadNamed={(name) => run("curves.load", { name }, `Loaded ${name}`)}
-          onDeleteNamed={(name) => run("curves.delete", { name }, `Deleted ${name}`)}
-          onExportNamed={(name) => run("curves.pick_export", { name })}
-          onImport={() => run("curves.pick_import")}
-        />
-        <SafetyDrawer
-          snap={snap}
-          diagnose={diagnose}
-          onConfig={(patch) => run("config", patch, "Setting saved")}
-          onDiagnose={async () => {
-            const result = (await run("diagnose")) as { text?: string } | null;
-            if (result?.text) setDiagnose(result.text);
-          }}
-          onEcAuto={() => run("mode", { mode: "released" }, "EC Auto")}
-          onTheme={() => {
-            const theme = snap.theme === "dark" ? "light" : "dark";
-            localStorage.setItem("fan-theme", theme);
-            run("config", { theme }, `${theme} theme`);
-          }}
-        />
+    <div className={`workspace ${collapsed ? "collapsed" : ""}`}>
+      <a
+        className="skip"
+        href="#content"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById("content")?.focus();
+        }}
+      >
+        Skip to controls
+      </a>
+      <aside className="sidebar">
+        <div className="brand">Fan Control</div>
+        <button onClick={toggleSidebar} aria-expanded={!collapsed}>
+          {collapsed ? "Expand" : "Collapse"} menu
+        </button>
+        <nav aria-label="Workspace">
+          {pages.map((page, i) => (
+            <NavLink key={page} to={`/${page.toLowerCase()}`} title={page}>
+              <span className="nav-index" aria-hidden="true">
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <span className="nav-label">{page}</span>
+            </NavLink>
+          ))}
+        </nav>
+        <button onClick={() => useUI.setState({ palette: true })}>
+          Commands <small>Ctrl K</small>
+        </button>
+        <small className="sidebar-foot">Daemon owns control</small>
+      </aside>
+      <div className="workarea">
+        <header className="status-strip">
+          <span className={status === "connected" ? "" : "warning"}>
+            {status.replaceAll("-", " ")}
+          </span>
+          <span>
+            {live?.effective_mode || "Waiting"} /{" "}
+            {live?.effective_profile || "Waiting"}
+          </span>
+          <TempBadge value={live?.control_temp} />
+          <span>{live?.backend_state || "No backend"}</span>
+          {live?.demo && <b>Simulated hardware</b>}
+          {!!live?.active_rules?.length && (
+            <span>{live.active_rules.length} active rule(s)</span>
+          )}
+        </header>
+        {status !== "connected" && (
+          <div className="notice warning" role="status">
+            {status === "stale"
+              ? "Live readings are stale. Showing the last known values."
+              : error || "Connecting to fan-daemon…"}
+          </div>
+        )}
+        {live?.critical_active && (
+          <div className="notice critical" role="alert">
+            Critical temperature. Thermal protection overrides normal fan
+            limits.
+          </div>
+        )}
+        {!!live?.fault_missing && (
+          <div className="notice warning">
+            Control temperature unavailable. See Diagnostics for fallback
+            status.
+          </div>
+        )}
+        <main
+          id="content"
+          tabIndex={-1}
+          className={status !== "connected" ? "stale" : ""}
+        >
+          {config ? (
+            <Routes>
+              {pages.map((page, i) => {
+                const View = views[i];
+                return (
+                  <Route
+                    key={page}
+                    path={`/${page.toLowerCase()}`}
+                    element={<View />}
+                  />
+                );
+              })}
+              <Route path="*" element={<Navigate to="/overview" replace />} />
+            </Routes>
+          ) : (
+            <Skeleton label="Waiting for a compatible daemon configuration…" />
+          )}
+        </main>
       </div>
-      <Toast message={toast} />
-    </main>
+      <CommandPalette />
+      {toast && (
+        <div className="toast" role="status">
+          {toast}
+          <button
+            onClick={() => useUI.setState({ toast: null })}
+            aria-label="Dismiss message"
+          >
+            Close
+          </button>
+        </div>
+      )}
+      {live?.backend_error && (
+        <div className="notice critical" role="alert">
+          Backend error: {live.backend_error}. See Diagnostics.
+        </div>
+      )}
+    </div>
+  );
+}
+export default function App() {
+  return (
+    <HashRouter>
+      <Workspace />
+    </HashRouter>
   );
 }

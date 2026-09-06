@@ -23,7 +23,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_rpc.py fan_diagnostics.py fan-daemon.py fan-gui.py fan-ctl.py fan_gtk.py test_fan_control.py
+        run: python -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_rpc.py fan_diagnostics.py fan_rules.py fan_engine.py fan_history.py fan-daemon.py fan-gui.py fan-ctl.py fan_gtk.py test_fan_control.py test_fan_control_v2.py
+      - name: SQLite support
+        run: python -c "import sqlite3"
       - name: Test
         run: python -m unittest -v
       - name: Headless smoke

@@ -1,43 +1,23 @@
 # fan-control roadmap
 
-## Shipped
+## v2 implementation
 
-- Native GTK4 + WebKitGTK 6 dashboard (no browser, no TCP port)
-- Shared `fan_policy.py` used by daemon, GUI, and CLI
-- Manual, Silent, Balanced, Performance, custom-curve, and EC-auto modes
-- Linked or independent fan targets and per-side custom curves
-- Visual curve editor, named curves, GTK import/export
-- Dual-axis history graphs, sparklines, CSV export
-- Sensor pinning and optional fan 3 when the backend lists it
-- Read-only Clevo RPM from tuxedo_io FANINFO; Uniwill tach is not probed
-- Curve hysteresis and a cap-independent critical-temperature override
-- Automatic firmware handoff when temperature data becomes unavailable
-- Exclusive EC lock + GUI pid so a crashed window does not block the daemon forever
-- Daemon SIGHUP reload and `fan-ctl`
-- Display-only tray and Gio desktop notifications
-- Persistent configuration shared through `/etc/fan-control.json`
-- Live hwmon sensors plus NVIDIA temperature fallback through `nvidia-smi`
-- A second `clevo_acpi` sysfs backend for boards where `tuxedo_io` refuses to bind
+The v2 workspace replaces the single-page dashboard with Overview, Fans,
+Curves, Sensors, Analytics, Automation, Settings, and Diagnostics. The daemon
+owns versioned configuration, migration backups, per-fan policy, revision
+checks, rule and schedule overlays, temporary fan tests, telemetry, and
+control decision traces. Legacy RPC and CLI controls remain supported.
 
-- Packaging for common Linux distributions (AUR PKGBUILD, Debian debhelper, Fedora/Copr RPM spec)
-- Resilient background daemon with graceful fallback on corrupt configurations
-- Shared sensor engine with expanded hardware support (AMD zenpower, Intel Arc xe/i915, NVIDIA nouveau & nvidia-smi)
-- Extended CLI `fan-ctl` commands (`cap`, `config`, `curves`)
-- High-efficiency live streaming telemetry (`live_snapshot`, append-only history)
-- Interactive visual curve studio with alignment grid and debounced drag controls
-- Unprivileged WebKitGTK dashboard communicating over a root-owned Unix RPC socket
-- Unified daemon control loop and FanController architecture with strict >=95% changed-line test coverage
+Read [the original plan](docs/v2-plan.md) for scope and
+[verification notes](docs/v2-verification.md) for tested behavior and limits.
 
-## Next
+## Deferred
 
-- Verified Uniwill tach only after a read-only register is confirmed per model
+- Privileged command execution. `run_command` is rejected by RPC; this release
+  has no executable allowlist or command runner.
+- Verified Uniwill tach support, pending a documented read-only register for
+  each supported model. Existing duty registers must not be interpreted as RPM.
+- Broader tray coverage across desktop environments.
 
-
-## Later
-
-- Optional per-GPU fan curves beyond CPU/GPU/Aux where a third EC channel is safe
-- Broader desktop-environment tray coverage (GNOME extension, Ayatana)
-
-RPM remains unimplemented on Uniwill: the known value on the target
-GWTN156-2BK is duty, not tach speed, and probing unknown EC registers risks
-hardware state.
+Remote control, cloud synchronization, calibration, kernel-driver replacement,
+and arbitrary plugin execution remain outside v2 scope.

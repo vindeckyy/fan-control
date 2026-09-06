@@ -10,9 +10,11 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 CHECKS = {
+    "Daemon": (ROOT / "fan_policy.py", r'^APP_VERSION = "([^"]+)"'),
+    "UI package": (ROOT / "ui" / "package.json", r'"version":\s*"([^"]+)"'),
     "PKGBUILD": (ROOT / "packaging" / "PKGBUILD", r"^pkgver=([^\s]+)"),
     "RPM spec": (ROOT / "packaging" / "fan-control.spec", r"^Version:\s*([^\s]+)"),
-    "Debian changelog": (ROOT / "packaging" / "debian" / "changelog", r"^fan-control \(([^)-]+)"),
+    "Debian changelog": (ROOT / "packaging" / "debian" / "changelog", r"^fan-control \((?:\d+:)?([^)-]+)"),
     "AppStream metainfo": (
         ROOT / "packaging" / "org.community.FanControl.metainfo.xml",
         r'<release\s+version="([^"]+)"',

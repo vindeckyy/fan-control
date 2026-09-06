@@ -48,7 +48,7 @@ def diagnose(config_path):
     p(f"  sensor  cpu:      {find_cpu_sensor() or 'not found'}")
     try:
         nvidia_ok = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5).returncode == 0
-    except (FileNotFoundError, OSError):
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
         nvidia_ok = False
     p(f"  nvidia  nvidia-smi: {'available' if nvidia_ok else 'no'}")
     if not devs and not clevo_fans:

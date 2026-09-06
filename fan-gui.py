@@ -30,8 +30,18 @@ def _headless_smoke(args):
     try:
         controller.tick_sensors()
         controller.tick_readback()
+        controller.tick_control()
         controller.tick_history()
-        sys.stdout.write(json.dumps(controller.snapshot(), default=str) + "\n")
+        result = controller.snapshot()
+        result["smoke"] = {
+            method: controller.handle(method)
+            for method in ("capabilities", "live", "diagnostics.decisions", "history.query")
+        }
+        if args.demo:
+            result["smoke"]["mutation"] = controller.handle("config", {
+                "expected_revision": controller.config["revision"], "theme": "dark",
+            })
+        sys.stdout.write(json.dumps(result, default=str) + "\n")
     finally:
         controller.close()
 
@@ -46,8 +56,6 @@ def main():
     parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
     parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
     parser.add_argument("--runtime-dir")
-    parser.add_argument("--port", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.demo and args.config == "/etc/fan-control.json" and "FAN_CONTROL_CONFIG" not in os.environ:
         args.config = "/tmp/fan-control-demo.json"

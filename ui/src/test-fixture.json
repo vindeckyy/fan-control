@@ -1,0 +1,1694 @@
+{
+  "capabilities": {
+    "protocol_version": 2,
+    "schema_version": 2,
+    "version": "2.0.0",
+    "features": [
+      "rules",
+      "history",
+      "per_fan_curves",
+      "schedule",
+      "decision_trace",
+      "fan_test",
+      "sensors_v2"
+    ],
+    "backend": "demo",
+    "fan_count": 2,
+    "demo": true
+  },
+  "snapshot": {
+    "fan1": 75,
+    "fan2": 75,
+    "fan3": 0,
+    "rpm1": 2150,
+    "rpm2": 2150,
+    "rpm3": null,
+    "ec_temp1": 69,
+    "ec_temp2": 71,
+    "updated": 1788616761.4647837,
+    "mode": "curve",
+    "profile": "balanced",
+    "max_duty": 100,
+    "hysteresis": 5,
+    "critical_temp": 95,
+    "linked": true,
+    "curve": [
+      [
+        0,
+        0
+      ],
+      [
+        50,
+        0
+      ],
+      [
+        60,
+        25
+      ],
+      [
+        70,
+        50
+      ],
+      [
+        80,
+        76
+      ],
+      [
+        90,
+        91
+      ],
+      [
+        95,
+        100
+      ],
+      [
+        110,
+        100
+      ]
+    ],
+    "curve_cpu": [
+      [
+        35,
+        20
+      ],
+      [
+        55,
+        40
+      ],
+      [
+        75,
+        75
+      ],
+      [
+        95,
+        100
+      ]
+    ],
+    "curve_gpu": null,
+    "named_curves": {},
+    "alerts": {
+      "desktop": false
+    },
+    "cpu_sensor": null,
+    "gpu_sensor": null,
+    "theme": "dark",
+    "targets": {
+      "1": 0,
+      "2": 0,
+      "3": 0
+    },
+    "custom_curve": [
+      [
+        0,
+        0
+      ],
+      [
+        50,
+        0
+      ],
+      [
+        60,
+        25
+      ],
+      [
+        70,
+        50
+      ],
+      [
+        80,
+        76
+      ],
+      [
+        90,
+        91
+      ],
+      [
+        95,
+        100
+      ],
+      [
+        110,
+        100
+      ]
+    ],
+    "temps": [
+      {
+        "id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "name": "coretemp",
+        "label": "CPU package",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 57.0,
+        "temp": 57.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon1/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "cpu"
+        ]
+      },
+      {
+        "id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "name": "amdgpu",
+        "label": "GPU core",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 72.0,
+        "temp": 72.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon2/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "gpu"
+        ]
+      }
+    ],
+    "primary_temp": 57.0,
+    "gpu_temp": 72.0,
+    "control_temp": 72.0,
+    "fans": [
+      1,
+      2
+    ],
+    "backend": "demo",
+    "demo": true,
+    "profiles": {
+      "silent": [
+        [
+          0,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          60,
+          0
+        ],
+        [
+          70,
+          30
+        ],
+        [
+          80,
+          61
+        ],
+        [
+          90,
+          86
+        ],
+        [
+          95,
+          100
+        ],
+        [
+          110,
+          100
+        ]
+      ],
+      "balanced": [
+        [
+          0,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          60,
+          25
+        ],
+        [
+          70,
+          50
+        ],
+        [
+          80,
+          76
+        ],
+        [
+          90,
+          91
+        ],
+        [
+          95,
+          100
+        ],
+        [
+          110,
+          100
+        ]
+      ],
+      "performance": [
+        [
+          0,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          60,
+          40
+        ],
+        [
+          70,
+          71
+        ],
+        [
+          80,
+          91
+        ],
+        [
+          85,
+          100
+        ],
+        [
+          110,
+          100
+        ]
+      ],
+      "custom": [
+        [
+          0,
+          0
+        ],
+        [
+          55,
+          0
+        ],
+        [
+          65,
+          28
+        ],
+        [
+          75,
+          56
+        ],
+        [
+          85,
+          83
+        ],
+        [
+          95,
+          100
+        ],
+        [
+          110,
+          100
+        ]
+      ]
+    },
+    "fault_missing": 0,
+    "critical_active": false,
+    "effective_mode": "auto",
+    "effective_profile": "performance",
+    "policy_source": "rule:gpu_warm",
+    "active_rules": [
+      "gpu_warm"
+    ],
+    "config_revision": 4,
+    "warnings": [],
+    "version": "2.0.0",
+    "config": {
+      "version": 2,
+      "revision": 4,
+      "mode": "auto",
+      "profile": "balanced",
+      "safety": {
+        "critical_temp": 95,
+        "global_max_duty": 100,
+        "hysteresis": 5,
+        "firmware_fallback": true
+      },
+      "display": {
+        "theme": "dark",
+        "temperature_unit": "c"
+      },
+      "notifications": {
+        "enabled": false,
+        "critical_temp": true
+      },
+      "sensors": {
+        "cpu_pin": null,
+        "gpu_pin": null,
+        "pinned": []
+      },
+      "fans": {
+        "fan1": {
+          "name": "CPU Fan",
+          "enabled": true,
+          "control": {
+            "type": "linked",
+            "curve_ref": null,
+            "target": 0
+          },
+          "min_duty": 0,
+          "max_duty": 100
+        },
+        "fan2": {
+          "name": "GPU Fan",
+          "enabled": true,
+          "control": {
+            "type": "linked",
+            "curve_ref": null,
+            "target": 0
+          },
+          "min_duty": 0,
+          "max_duty": 100
+        },
+        "fan3": {
+          "name": "Fan 3",
+          "enabled": true,
+          "control": {
+            "type": "linked",
+            "curve_ref": null,
+            "target": 0
+          },
+          "min_duty": 0,
+          "max_duty": 100
+        }
+      },
+      "curves": {
+        "cpu_default": {
+          "name": "CPU default",
+          "temp_source": "cpu",
+          "points": [
+            [
+              35,
+              20
+            ],
+            [
+              55,
+              40
+            ],
+            [
+              75,
+              75
+            ],
+            [
+              95,
+              100
+            ]
+          ]
+        }
+      },
+      "rules": [
+        {
+          "id": "gpu_warm",
+          "name": "GPU cooling boost",
+          "enabled": true,
+          "priority": 100,
+          "trigger": {
+            "type": "temp_above",
+            "sensor": "gpu",
+            "value": 70
+          },
+          "condition": {
+            "sustain_ticks": 3,
+            "cooldown_seconds": 30
+          },
+          "action": {
+            "type": "set_profile",
+            "profile": "performance"
+          }
+        }
+      ],
+      "schedule": {
+        "enabled": false,
+        "timezone": "local",
+        "items": []
+      },
+      "history": {
+        "persist": true,
+        "retention_days": 7
+      }
+    },
+    "configured_mode": "auto",
+    "configured_profile": "balanced"
+  },
+  "live": {
+    "fan1": 75,
+    "fan2": 75,
+    "fan3": 0,
+    "rpm1": 2150,
+    "rpm2": 2150,
+    "rpm3": null,
+    "ec_temp1": 69,
+    "ec_temp2": 71,
+    "updated": 1788616761.4647837,
+    "targets": {
+      "1": 0,
+      "2": 0,
+      "3": 0
+    },
+    "temps": [
+      {
+        "id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "name": "coretemp",
+        "label": "CPU package",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 57.0,
+        "temp": 57.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon1/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "cpu"
+        ]
+      },
+      {
+        "id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "name": "amdgpu",
+        "label": "GPU core",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 72.0,
+        "temp": 72.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon2/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "gpu"
+        ]
+      }
+    ],
+    "primary_temp": 57.0,
+    "gpu_temp": 72.0,
+    "control_temp": 72.0,
+    "mode": "curve",
+    "profile": "balanced",
+    "linked": true,
+    "demo": true,
+    "fault_missing": 0,
+    "critical_active": false,
+    "effective_mode": "auto",
+    "effective_profile": "performance",
+    "policy_source": "rule:gpu_warm",
+    "active_rules": [
+      "gpu_warm"
+    ],
+    "configured_mode": "auto",
+    "configured_profile": "balanced",
+    "backend_state": "demo",
+    "backend_error": null,
+    "alerts": {
+      "desktop": false
+    },
+    "critical_temp": 95,
+    "critical_alerts": true,
+    "notifications": [],
+    "config_revision": 4,
+    "seq": 1,
+    "timestamp": 1788616761.4651568
+  },
+  "sensors.list": {
+    "sensors": [
+      {
+        "id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "name": "coretemp",
+        "label": "CPU package",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 57.0,
+        "temp": 57.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon1/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "cpu"
+        ]
+      },
+      {
+        "id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "name": "amdgpu",
+        "label": "GPU core",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 72.0,
+        "temp": 72.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon2/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "gpu"
+        ]
+      }
+    ],
+    "aliases": {
+      "cpu": "hwmon:coretemp:platform-coretemp.0:temp1",
+      "gpu": "hwmon:amdgpu:pci-0000:05:00.0:temp1"
+    },
+    "attribution": {
+      "fan1": "max",
+      "fan2": "max"
+    },
+    "hottest": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+    "config_revision": 4
+  },
+  "rules.list": {
+    "rules": [
+      {
+        "id": "gpu_warm",
+        "name": "GPU cooling boost",
+        "enabled": true,
+        "priority": 100,
+        "trigger": {
+          "type": "temp_above",
+          "sensor": "gpu",
+          "value": 70
+        },
+        "condition": {
+          "sustain_ticks": 3,
+          "cooldown_seconds": 30
+        },
+        "action": {
+          "type": "set_profile",
+          "profile": "performance"
+        },
+        "state": "active",
+        "runtime": {
+          "consecutive_match_count": 12,
+          "active_since": "2026-09-05T09:59:21.463728",
+          "last_fired_at": "2026-09-05T09:59:21.463728",
+          "cooldown_until": "2026-09-05T09:59:51.463728"
+        }
+      }
+    ],
+    "config_revision": 4
+  },
+  "history.query": {
+    "samples": [
+      {
+        "id": 1,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 2,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 3,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 4,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 5,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 6,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 7,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 8,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 9,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 10,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 11,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      },
+      {
+        "id": 12,
+        "ts": 1788616761.0,
+        "mode": "auto",
+        "profile": "balanced",
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "hottest_temp": 72.0,
+        "critical": false
+      }
+    ],
+    "fans": [
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 1790,
+        "duty": 55,
+        "requested": 55
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 1790,
+        "duty": 55,
+        "requested": 55
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 1790,
+        "duty": 55,
+        "requested": 55
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 1790,
+        "duty": 55,
+        "requested": 55
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan1",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan2",
+        "rpm": 2150,
+        "duty": 75,
+        "requested": 75
+      },
+      {
+        "ts": 1788616761.0,
+        "fan_id": "fan3",
+        "rpm": null,
+        "duty": 0,
+        "requested": null
+      }
+    ],
+    "sensors": [
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "value": 72.0
+      },
+      {
+        "ts": 1788616761.0,
+        "sensor_id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "value": 57.0
+      }
+    ],
+    "degraded": false
+  },
+  "history.stats": {
+    "samples": 12,
+    "avg_temp": 72.0,
+    "max_temp": 72.0,
+    "critical_events": 0,
+    "profiles": [
+      {
+        "profile": "performance",
+        "samples": 10
+      },
+      {
+        "profile": "balanced",
+        "samples": 2
+      }
+    ],
+    "duty_bands": [
+      {
+        "fan_id": "fan1",
+        "band": "40-60",
+        "samples": 2
+      },
+      {
+        "fan_id": "fan1",
+        "band": "60-80",
+        "samples": 10
+      },
+      {
+        "fan_id": "fan2",
+        "band": "40-60",
+        "samples": 2
+      },
+      {
+        "fan_id": "fan2",
+        "band": "60-80",
+        "samples": 10
+      },
+      {
+        "fan_id": "fan3",
+        "band": "0-20",
+        "samples": 12
+      }
+    ],
+    "per_fan": [
+      {
+        "fan_id": "fan1",
+        "avg_duty": 71.66666666666667,
+        "max_duty": 75,
+        "avg_rpm": 2090.0,
+        "max_rpm": 2150
+      },
+      {
+        "fan_id": "fan2",
+        "avg_duty": 71.66666666666667,
+        "max_duty": 75,
+        "avg_rpm": 2090.0,
+        "max_rpm": 2150
+      },
+      {
+        "fan_id": "fan3",
+        "avg_duty": 0.0,
+        "max_duty": 0,
+        "avg_rpm": null,
+        "max_rpm": null
+      }
+    ],
+    "degraded": false
+  },
+  "diagnostics.snapshot": {
+    "daemon": {
+      "version": "2.0.0",
+      "protocol_version": 2,
+      "schema_version": 2,
+      "config_path": "/tmp/tmpie3y590b/config.json",
+      "config_revision": 4,
+      "uptime_s": 0.0,
+      "demo": true
+    },
+    "backend": {
+      "name": "demo",
+      "fans": [
+        1,
+        2
+      ]
+    },
+    "capabilities": {
+      "protocol_version": 2,
+      "schema_version": 2,
+      "version": "2.0.0",
+      "features": [
+        "rules",
+        "history",
+        "per_fan_curves",
+        "schedule",
+        "decision_trace",
+        "fan_test",
+        "sensors_v2"
+      ],
+      "backend": "demo",
+      "fan_count": 2,
+      "demo": true
+    },
+    "sensors": [
+      {
+        "id": "hwmon:coretemp:platform-coretemp.0:temp1",
+        "name": "coretemp",
+        "label": "CPU package",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 57.0,
+        "temp": 57.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon1/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "cpu"
+        ]
+      },
+      {
+        "id": "hwmon:amdgpu:pci-0000:05:00.0:temp1",
+        "name": "amdgpu",
+        "label": "GPU core",
+        "channel": "temp1",
+        "kind": "temperature",
+        "value": 72.0,
+        "temp": 72.0,
+        "unit": "c",
+        "source": "hwmon",
+        "runtime_path": "/sys/class/hwmon/hwmon2/temp1_input",
+        "hwmon_index": null,
+        "available": true,
+        "aliases": [
+          "gpu"
+        ]
+      }
+    ],
+    "configuration": {
+      "mode": "auto",
+      "profile": "balanced",
+      "effective_mode": "auto",
+      "effective_profile": "performance",
+      "warnings": []
+    },
+    "runtime": {
+      "overrides": {},
+      "missing_temp_ticks": 0,
+      "released_for_fault": false
+    },
+    "history": {
+      "persist": true,
+      "path": "/tmp/tmpie3y590b/history.db",
+      "degraded": false,
+      "error": null,
+      "memory_samples": 12,
+      "buffered": 0,
+      "writes": 12,
+      "retention_days": 7
+    },
+    "warnings": []
+  },
+  "diagnostics.decisions": {
+    "decisions": [
+      {
+        "timestamp": "2026-09-05T09:59:21.463300",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:balanced",
+        "requested_duty": 55,
+        "bounded_duty": 55,
+        "final_duty": 55,
+        "previous_duty": 0,
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "policy_source": "configured",
+        "safety_override": false,
+        "write_performed": true,
+        "write_suppressed_reason": null,
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463300",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:balanced",
+        "requested_duty": 55,
+        "bounded_duty": 55,
+        "final_duty": 55,
+        "previous_duty": 0,
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "policy_source": "configured",
+        "safety_override": false,
+        "write_performed": true,
+        "write_suppressed_reason": null,
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463613",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:balanced",
+        "requested_duty": 55,
+        "bounded_duty": 55,
+        "final_duty": 55,
+        "previous_duty": 55,
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "policy_source": "configured",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463613",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:balanced",
+        "requested_duty": 55,
+        "bounded_duty": 55,
+        "final_duty": 55,
+        "previous_duty": 55,
+        "effective_mode": "auto",
+        "effective_profile": "balanced",
+        "policy_source": "configured",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463728",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 55,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": true,
+        "write_suppressed_reason": null,
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463728",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 55,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": true,
+        "write_suppressed_reason": null,
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463839",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463839",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463929",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.463929",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464011",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464011",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464090",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464090",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464172",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464172",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464253",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464253",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464335",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464335",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464650",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464650",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464741",
+        "fan_id": "fan1",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      },
+      {
+        "timestamp": "2026-09-05T09:59:21.464741",
+        "fan_id": "fan2",
+        "sensor_id": "max",
+        "source_temp": 72.0,
+        "configured_curve": "profile:performance",
+        "requested_duty": 75,
+        "bounded_duty": 75,
+        "final_duty": 75,
+        "previous_duty": 75,
+        "effective_mode": "auto",
+        "effective_profile": "performance",
+        "policy_source": "rule:gpu_warm",
+        "safety_override": false,
+        "write_performed": false,
+        "write_suppressed_reason": "hysteresis",
+        "control_type": "linked"
+      }
+    ]
+  }
+}

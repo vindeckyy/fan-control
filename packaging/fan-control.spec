@@ -1,5 +1,6 @@
 Name:           fan-control
-Version:        2026.9.1
+Version:        2.0.0
+Epoch:          1
 Release:        1%{?dist}
 Summary:        Safety-focused Linux fan-control daemon and native WebKitGTK workstation
 
@@ -9,7 +10,7 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      x86_64
 BuildRequires:  python3-devel
-BuildRequires:  nodejs
+BuildRequires:  nodejs >= 20
 BuildRequires:  npm
 BuildRequires:  systemd-rpm-macros
 
@@ -34,11 +35,14 @@ dashboard for compatible Clevo and Tongfang embedded controller interfaces.
 %make_build ui
 
 %check
+python3 -c 'import sqlite3'
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v
 cd ui && npm test
 
 %install
 %make_install PREFIX=/usr
+mkdir -p %{buildroot}%{_unitdir}
+mv %{buildroot}/etc/systemd/system/fan-daemon.service %{buildroot}%{_unitdir}/fan-daemon.service
 mkdir -p %{buildroot}%{_sysconfdir}/fan-control.d
 
 
@@ -67,6 +71,7 @@ getent group fan-control >/dev/null || groupadd -r fan-control
 %{_datadir}/polkit-1/actions/org.community.FanControl.policy
 %{_unitdir}/fan-daemon.service
 %{_prefix}/lib/tmpfiles.d/%{name}.conf
+%{_prefix}/lib/sysusers.d/%{name}.conf
 
 %changelog
 * Thu Sep 03 2026 Fan Control Community <fan-control@community.org> - 2026.9.1-1
