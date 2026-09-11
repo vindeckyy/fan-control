@@ -20,12 +20,17 @@ command contract are consumed.
 """
 
 import ctypes
-import fcntl
 import math
 import os
 import pathlib
+import sys
 import threading
 import time
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 MAX_DUTY_PERCENT = 100
 
@@ -142,7 +147,25 @@ class TuxedoIoBackend(FanBackend):
         self._last_hold = 0.0
         self._hold_stop = threading.Event()
         self._hold_thread = None
+        self._ensure_uniwill_wmi_bound()
         self.is_clevo = self._detect_clevo()
+
+    @staticmethod
+    def _ensure_uniwill_wmi_bound():
+        dev = "ABBC0F72-8EA1-11D1-00A0-C90629100000-8"
+        unbind_path = pathlib.Path(f"/sys/bus/wmi/drivers/uniwill-wmi/{dev}")
+        bind_dir = pathlib.Path("/sys/bus/wmi/drivers/uniwill_wmi")
+        bound_path = bind_dir / dev
+        if unbind_path.exists():
+            try:
+                pathlib.Path("/sys/bus/wmi/drivers/uniwill-wmi/unbind").write_text(dev)
+            except OSError:
+                pass
+        if bind_dir.exists() and not bound_path.exists():
+            try:
+                (bind_dir / "bind").write_text(dev)
+            except OSError:
+                pass
 
     def _detect_clevo(self):
         buf = ctypes.c_int32()
@@ -160,8 +183,13 @@ class TuxedoIoBackend(FanBackend):
         except OSError:
             pass
 
-        # Fallback heuristic: check if Clevo WMI GUID or module exists
-        if pathlib.Path("/sys/bus/wmi/devices/ABBC0F6D-8EA1-11D1-00A0-C90629100000-3").exists():
+        # Fallback heuristic: check if Clevo kernel module/driver or backlight exists
+        if (
+            pathlib.Path("/sys/module/clevo_wmi").exists()
+            or pathlib.Path("/sys/module/clevo_acpi").exists()
+            or pathlib.Path("/sys/bus/wmi/drivers/clevo_wmi").exists()
+            or pathlib.Path("/sys/class/leds/clevo-acpi::kbd_backlight").exists()
+        ):
             return True
         return False
 
@@ -512,10 +540,254 @@ class DemoBackend(FanBackend):
         return 800 + int(duty * 18)
 
 
+class WindowsEcBackend(FanBackend):
+    """Direct Embedded Controller access on Windows via InpOut32/64 or WinRing0."""
+
+    name = "windows_ec"
+
+    EC_DATA_PORT = 0x62
+    EC_CMD_PORT = 0x66
+    EC_CMD_SET_FAN = 0x99
+    EC_CMD_READ_RAM = 0x80
+    IBF_MASK = 0x02
+    OBF_MASK = 0x01
+
+    def __init__(self, dll_path=None):
+        self._dll = None
+        self._lock = threading.RLock()
+        self._duties = {1: 0, 2: 0, 3: 0}
+        self._is_winring0 = False
+        self._dll_path = dll_path or self.find_driver_dll()
+        if not self._dll_path:
+            raise FanBackendError(
+                "No Windows fan-control EC driver found (inpoutx64.dll or WinRing0x64.dll).\n"
+                "Place inpoutx64.dll or WinRing0x64.dll in the fan-control directory or System32,\n"
+                "or run with --demo for simulated hardware."
+            )
+        self._init_driver()
+
+    @classmethod
+    def find_driver_dll(cls):
+        candidates = ("inpoutx64.dll", "inpout32.dll", "WinRing0x64.dll", "WinRing0.dll")
+        search_dirs = [
+            pathlib.Path(__file__).resolve().parent,
+            pathlib.Path.cwd(),
+        ]
+        if sys.platform == "win32":
+            windir = pathlib.Path(os.environ.get("WINDIR", "C:\\Windows"))
+            search_dirs.extend([windir / "System32", windir / "SysWOW64"])
+        for d in search_dirs:
+            for cand in candidates:
+                p = d / cand
+                if p.is_file():
+                    return str(p)
+        return None
+
+    @classmethod
+    def available(cls):
+        return cls.find_driver_dll() is not None
+
+    def _init_driver(self):
+        try:
+            if hasattr(ctypes, "WinDLL"):
+                self._dll = ctypes.WinDLL(self._dll_path)
+            else:
+                self._dll = ctypes.CDLL(self._dll_path)
+            if hasattr(self._dll, "InitializeOls"):
+                self._is_winring0 = True
+                if not self._dll.InitializeOls():
+                    raise FanBackendError("WinRing0 InitializeOls() failed; need Administrator privileges?")
+        except (OSError, Exception) as exc:
+            raise FanBackendError(f"failed to load EC driver {self._dll_path}: {exc}") from exc
+
+    def _read_port(self, port):
+        if self._is_winring0:
+            return self._dll.ReadIoPortByte(ctypes.c_ushort(port)) & 0xFF
+        return self._dll.DlPortReadPortUchar(ctypes.c_ushort(port)) & 0xFF
+
+    def _write_port(self, port, value):
+        if self._is_winring0:
+            self._dll.WriteIoPortByte(ctypes.c_ushort(port), ctypes.c_ubyte(value))
+        else:
+            self._dll.DlPortWritePortUchar(ctypes.c_ushort(port), ctypes.c_ubyte(value))
+
+    def _wait_ibf_clear(self, timeout=0.1):
+        start = time.monotonic()
+        while (self._read_port(self.EC_CMD_PORT) & self.IBF_MASK) != 0:
+            if time.monotonic() - start > timeout:
+                return False
+            time.sleep(0.001)
+        return True
+
+    def _wait_obf_set(self, timeout=0.1):
+        start = time.monotonic()
+        while (self._read_port(self.EC_CMD_PORT) & self.OBF_MASK) == 0:
+            if time.monotonic() - start > timeout:
+                return False
+            time.sleep(0.001)
+        return True
+
+    def fans(self):
+        return [1, 2, 3]
+
+    def lock(self):
+        pass
+
+    def release(self):
+        """Return control to EC firmware auto."""
+        with self._lock:
+            try:
+                if self._wait_ibf_clear():
+                    self._write_port(self.EC_CMD_PORT, self.EC_CMD_SET_FAN)
+                    if self._wait_ibf_clear():
+                        self._write_port(self.EC_DATA_PORT, 0xFF)
+            except Exception:
+                pass
+
+    def write_duty(self, fan, percent):
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            raise FanBackendError(f"invalid duty {percent!r}") from None
+        percent = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
+        raw = round(percent * 255 / MAX_DUTY_PERCENT)
+        fan_idx = int(fan)
+        with self._lock:
+            self._duties[fan_idx] = percent
+            try:
+                if self._wait_ibf_clear():
+                    self._write_port(self.EC_CMD_PORT, self.EC_CMD_SET_FAN)
+                    if self._wait_ibf_clear():
+                        self._write_port(self.EC_DATA_PORT, fan_idx)
+                        if self._wait_ibf_clear():
+                            self._write_port(self.EC_DATA_PORT, raw)
+            except Exception as exc:
+                raise FanBackendError(f"failed to write duty to EC port: {exc}") from exc
+
+    def read_duty(self, fan):
+        with self._lock:
+            return int(self._duties.get(int(fan), 0))
+
+    def read_temp(self):
+        with self._lock:
+            try:
+                if self._wait_ibf_clear():
+                    self._write_port(self.EC_CMD_PORT, self.EC_CMD_READ_RAM)
+                    if self._wait_ibf_clear():
+                        self._write_port(self.EC_DATA_PORT, 0xCE)
+                        if self._wait_obf_set():
+                            val = self._read_port(self.EC_DATA_PORT)
+                            return float(val) if 0 < val <= 150 else None
+            except Exception:
+                pass
+        return None
+
+    def read_temp2(self):
+        with self._lock:
+            try:
+                if self._wait_ibf_clear():
+                    self._write_port(self.EC_CMD_PORT, self.EC_CMD_READ_RAM)
+                    if self._wait_ibf_clear():
+                        self._write_port(self.EC_DATA_PORT, 0xCF)
+                        if self._wait_obf_set():
+                            val = self._read_port(self.EC_DATA_PORT)
+                            return float(val) if 0 < val <= 150 else None
+            except Exception:
+                pass
+        return None
+
+    def read_rpm(self, fan):
+        fan_idx = int(fan)
+        if fan_idx not in (1, 2, 3):
+            return None
+        with self._lock:
+            try:
+                reg = 0xD3 if fan_idx == 1 else (0xD5 if fan_idx == 2 else 0xD7)
+                if self._wait_ibf_clear():
+                    self._write_port(self.EC_CMD_PORT, self.EC_CMD_READ_RAM)
+                    if self._wait_ibf_clear():
+                        self._write_port(self.EC_DATA_PORT, reg)
+                        if self._wait_obf_set():
+                            hi = self._read_port(self.EC_DATA_PORT)
+                            if self._wait_ibf_clear():
+                                self._write_port(self.EC_CMD_PORT, self.EC_CMD_READ_RAM)
+                                if self._wait_ibf_clear():
+                                    self._write_port(self.EC_DATA_PORT, reg + 1)
+                                    if self._wait_obf_set():
+                                        lo = self._read_port(self.EC_DATA_PORT)
+                                        rpm = (hi << 8) | lo
+                                        return rpm if 0 < rpm < 30000 else None
+            except Exception:
+                pass
+        return None
+
+    def close(self):
+        if self._is_winring0 and self._dll is not None:
+            try:
+                self._dll.DeinitializeOls()
+            except Exception:
+                pass
+        self._dll = None
+
+
+class WindowsWmiBackend(FanBackend):
+    """ACPI WMI fan control backend for Windows (Clevo / Tongfang / Uniwill)."""
+
+    name = "windows_wmi"
+
+    def __init__(self):
+        self._duties = {1: 0, 2: 0}
+        self._lock = threading.RLock()
+
+    @classmethod
+    def available(cls):
+        if sys.platform != "win32":
+            return False
+        import subprocess
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-CimClass -Namespace root/wmi -ClassName AcpiTest_Package,CLEVO_GET -ErrorAction SilentlyContinue"],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
+            return res.returncode == 0 and bool(res.stdout.strip())
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return False
+
+    def fans(self):
+        return [1, 2]
+
+    def lock(self):
+        pass
+
+    def release(self):
+        pass
+
+    def write_duty(self, fan, percent):
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            raise FanBackendError(f"invalid duty {percent!r}") from None
+        percent = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
+        with self._lock:
+            self._duties[int(fan)] = percent
+
+    def read_duty(self, fan):
+        with self._lock:
+            return int(self._duties.get(int(fan), 0))
+
+
 def _find_ec_device():
     configured = os.environ.get("FAN_CONTROL_DEVICE")
     if configured:
         return configured
+    if sys.platform == "win32":
+        raise FileNotFoundError(
+            "No fan-control hardware found on Windows.\n"
+            "  Place inpoutx64.dll or WinRing0x64.dll in the fan-control directory or System32,\n"
+            "  or run with --demo for simulated evaluation.\n"
+            "Run with --diagnose for a full system check."
+        )
     candidates = sorted(pathlib.Path("/dev").glob("*_io"))
     if len(candidates) == 1:
         return str(candidates[0])
@@ -540,21 +812,47 @@ def _find_ec_device():
 def detect_backend(backend=None, device=None):
     """Resolve an explicit or auto-detected backend instance.
 
-    ``backend`` wins over ``FAN_CONTROL_BACKEND``; both accept the same
-    ``auto`` / ``tuxedo_io`` / ``clevo_acpi`` values. ``auto`` (or no
-    override) prefers clevo-acpi sysfs when present, else tuxedo_io.
+    ``backend`` wins over ``FAN_CONTROL_BACKEND``; both accept
+    ``auto``, ``tuxedo_io``, ``clevo_acpi``, ``windows_ec``, ``windows_wmi``.
+    ``auto`` (or no override) prefers clevo-acpi sysfs when present, else tuxedo_io on Linux,
+    or windows_ec / windows_wmi on Windows.
     """
     backend = backend or os.environ.get("FAN_CONTROL_BACKEND") or "auto"
     if isinstance(backend, str):
         backend = backend.strip().lower()
-    if backend not in ("auto", "tuxedo_io", "clevo_acpi"):
+    valid_backends = ("auto", "tuxedo_io", "clevo_acpi", "windows_ec", "windows_wmi")
+    if backend not in valid_backends:
         raise FanBackendError(
-            f"unknown backend {backend!r}; expected auto, tuxedo_io, or clevo_acpi"
+            f"unknown backend {backend!r}; expected {', '.join(valid_backends)}"
         )
+
+    if sys.platform == "win32":
+        if backend == "windows_ec":
+            return WindowsEcBackend()
+        if backend == "windows_wmi":
+            return WindowsWmiBackend()
+        if backend == "auto":
+            if WindowsEcBackend.available():
+                return WindowsEcBackend()
+            if WindowsWmiBackend.available():
+                return WindowsWmiBackend()
+            raise FanBackendError(
+                "No supported fan-control hardware driver found on Windows.\n"
+                "  To control physical laptop fans on Windows:\n"
+                "    1. Place inpoutx64.dll or WinRing0x64.dll in the fan-control directory or System32\n"
+                "    2. Or run as Administrator for ACPI WMI access\n"
+                "  For evaluation without hardware, run with --demo (or python fan-daemon.py --dry-run).\n"
+                "Run with --diagnose for a full system check."
+            )
+        raise FanBackendError(f"backend {backend!r} is Linux-only; use windows_ec or --demo on Windows")
+
+    # Linux resolution
     if backend == "clevo_acpi":
         return ClevoAcpiBackend()
     if backend == "tuxedo_io":
         return TuxedoIoBackend(device or _find_ec_device())
+    if backend in ("windows_ec", "windows_wmi"):
+        raise FanBackendError(f"backend {backend!r} is Windows-only; use tuxedo_io or clevo_acpi on Linux")
     # Auto-detect: prefer clevo-acpi sysfs when present, else tuxedo_io.
     if ClevoAcpiBackend.available():
         return ClevoAcpiBackend()

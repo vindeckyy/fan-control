@@ -10,6 +10,7 @@ import copy
 import json
 import math
 import pathlib
+import sys
 
 from fan_backend import MAX_DUTY_PERCENT, migrate_config
 
@@ -172,6 +173,8 @@ def scan_sensors(demo=False, include_nvidia=True, hwmon_dir="/sys/class/hwmon"):
             {"name": "k10temp", "label": "Tccd1", "temp": 58 + 8 * math.sin(time.monotonic() / 21)},
             {"name": "amdgpu", "label": "edge", "temp": 54 + 7 * math.sin(time.monotonic() / 23)},
         ]
+    if sys.platform == "win32":
+        return _scan_sensors_windows(include_nvidia=include_nvidia)
     found = []
     base = pathlib.Path(hwmon_dir)
     if base.exists():
@@ -952,16 +955,20 @@ def save_document(path, doc, *, original_version=None):
 
         _os.fsync(handle.fileno())
     temporary.replace(path)
-    try:
-        dir_fd = _os.open(str(path.parent), _os.O_DIRECTORY)
-    except OSError:
-        return
-    try:
-        _os.fsync(dir_fd)
-    except OSError:
-        pass
-    finally:
-        _os.close(dir_fd)
+    if hasattr(_os, "O_DIRECTORY") and sys.platform != "win32":
+        try:
+            dir_fd = _os.open(str(path.parent), _os.O_DIRECTORY)
+        except (OSError, AttributeError):
+            return
+        try:
+            _os.fsync(dir_fd)
+        except (OSError, AttributeError):
+            pass
+        finally:
+            try:
+                _os.close(dir_fd)
+            except (OSError, UnboundLocalError):
+                pass
 
 
 APP_VERSION = "2.0.0"
@@ -1062,6 +1069,92 @@ def parse_nvidia_smi_records(output):
     return records
 
 
+def _scan_sensor_records_windows(include_nvidia=True):
+    """Discover temperature sensors on Windows with stable persistent identities."""
+    import shutil
+    import subprocess
+
+    records = []
+    seen_ids = set()
+
+    # 1. ACPI thermal zones via PowerShell CIM / WMI
+    try:
+        ps_cmd = (
+            "$ErrorActionPreference='SilentlyContinue'; "
+            "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | "
+            "ForEach-Object { $_.InstanceName + '|' + $_.CurrentTemperature }"
+        )
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.splitlines():
+                line = line.strip()
+                if not line or "|" not in line:
+                    continue
+                parts = line.split("|", 1)
+                inst, temp_raw = parts[0].strip(), parts[1].strip()
+                try:
+                    raw_k = float(temp_raw)
+                    temp_c = (raw_k - 2732) / 10.0
+                    if 0 < temp_c <= 150:
+                        clean_id = inst.replace("\\", "_").replace(":", "_").replace(" ", "_").lower()
+                        label = inst.split("\\")[-1] or inst
+                        sensor_id = f"wmi:acpi:{clean_id}:temp"
+                        if sensor_id in seen_ids:
+                            sensor_id = f"{sensor_id}~{len(records)}"
+                        seen_ids.add(sensor_id)
+                        records.append(_record_from_value(
+                            "acpi", f"ThermalZone {label}", round(temp_c, 1),
+                            sensor_id=sensor_id,
+                            channel="acpi",
+                            source="wmi",
+                            runtime_path=None,
+                        ))
+                except (ValueError, TypeError):
+                    continue
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        pass
+
+    # 2. NVIDIA GPU via nvidia-smi
+    if include_nvidia and not any(rec["name"] == "nvidia" for rec in records):
+        smi = shutil.which("nvidia-smi")
+        if not smi:
+            for cand in (
+                pathlib.Path("C:\\Windows\\System32\\nvidia-smi.exe"),
+                pathlib.Path("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"),
+            ):
+                if cand.is_file():
+                    smi = str(cand)
+                    break
+        if smi:
+            try:
+                res = subprocess.run(
+                    [smi, "--query-gpu=index,temperature.gpu,name,pci.bus_id",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=2, check=False,
+                )
+                if res.returncode == 0:
+                    for parsed in parse_nvidia_smi_records(res.stdout):
+                        records.append(_record_from_value(
+                            "nvidia", f"GPU {parsed['index']} · {parsed['name']}", parsed["temp"],
+                            sensor_id=parsed["id"],
+                            channel="gpu",
+                            source="nvidia-smi",
+                            runtime_path=None,
+                        ))
+            except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                pass
+
+    return records
+
+
+def _scan_sensors_windows(include_nvidia=True):
+    records = _scan_sensor_records_windows(include_nvidia=include_nvidia)
+    return [{"name": r["name"], "label": r["label"], "temp": r["temp"]} for r in records]
+
+
 def scan_sensor_records(demo=False, include_nvidia=True, hwmon_dir="/sys/class/hwmon"):
     """Discover temperature sensors with stable persistent identities.
 
@@ -1088,6 +1181,9 @@ def scan_sensor_records(demo=False, include_nvidia=True, hwmon_dir="/sys/class/h
                 runtime_path=None,
             ))
         return records
+
+    if sys.platform == "win32":
+        return _scan_sensor_records_windows(include_nvidia=include_nvidia)
 
     records = []
     seen_ids = set()

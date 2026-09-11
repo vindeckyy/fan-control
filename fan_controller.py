@@ -16,6 +16,7 @@ import datetime
 import math
 import os
 import pathlib
+import sys
 import threading
 import time
 
@@ -347,8 +348,13 @@ class FanController:
         self.state = LegacyStateView(self)
         history_cfg = self.config.get("history") or {}
         if data_dir is None:
+            default_data = (
+                str(pathlib.Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "fan-control" / "data")
+                if sys.platform == "win32"
+                else "/var/lib/fan-control"
+            )
             data_dir = os.environ.get("FAN_CONTROL_DATA_DIR") or (
-                str(self.runtime_dir) if demo else "/var/lib/fan-control"
+                str(self.runtime_dir) if demo else default_data
             )
         self.history_store = HistoryStore(
             pathlib.Path(data_dir) / "history.db",

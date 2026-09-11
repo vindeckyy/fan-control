@@ -1375,8 +1375,11 @@ class DeepCoverageTests(unittest.TestCase):
                 raise BrokenPipeError("pipe broken")
             return orig_exchange(method, params)
         self.client._exchange = flaky_exchange
-        res = self.client.call("snapshot")
-        self.assertIn("mode", res)
+        try:
+            res = self.client.call("snapshot")
+            self.assertIn("mode", res)
+        finally:
+            self.client._exchange = orig_exchange
     def test_rpc_client_oversized_reply(self):
         with mock.patch("fan_rpc._read_line", side_effect=rpc._FrameTooLarge()):
             with self.assertRaises(ConnectionError) as ctx:

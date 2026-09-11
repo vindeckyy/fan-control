@@ -5,3 +5,5 @@ ui/node_modules/
 .superpowers/
 .coverage
 *.old/
+dist/
+build/

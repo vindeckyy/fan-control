@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: python -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_rpc.py fan_diagnostics.py fan_rules.py fan_engine.py fan_history.py fan-daemon.py fan-gui.py fan-ctl.py fan_gtk.py test_fan_control.py test_fan_control_v2.py
+        run: python -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan_rpc.py fan_diagnostics.py fan_rules.py fan_engine.py fan_history.py fan-daemon.py fan-gui.py fan-ctl.py fan_gtk.py fan_windows_gui.py test_fan_control.py test_fan_control_v2.py test_fan_control_windows.py
       - name: SQLite support
         run: python -c "import sqlite3"
       - name: Test
@@ -47,6 +47,25 @@ jobs:
           npm ci
           npm test
           npm run build
+
+  windows:
+    name: Windows Build & Test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements-windows.txt
+      - name: Run Windows Test Suite
+        run: python -m unittest discover -p "test_*.py" -v
+      - name: Headless Smoke Test
+        run: python fan-gui.py --demo --headless-smoke
+      - name: Build PyInstaller Windows Executables
+        run: pyinstaller --clean -y packaging/windows/fan-control-pyinstaller.spec
 
   lint:
     name: Lint & Style

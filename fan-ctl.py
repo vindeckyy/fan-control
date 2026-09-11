@@ -30,7 +30,13 @@ class Result:
 
 def run_command(argv):
     parser = argparse.ArgumentParser(prog="fan-ctl", description=__doc__)
-    parser.add_argument("--config", default=os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json"))
+    default_config = os.environ.get(
+        "FAN_CONTROL_CONFIG",
+        str(pathlib.Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "fan-control" / "fan-control.json")
+        if sys.platform == "win32"
+        else "/etc/fan-control.json",
+    )
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--runtime-dir")
     parser.add_argument("--json", action="store_true")
     parser.add_argument(

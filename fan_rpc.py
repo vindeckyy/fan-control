@@ -11,12 +11,19 @@ reply per line: ``{"method": ..., "params": {...}}`` ->
 from __future__ import annotations
 
 import errno
-import grp
 import json
 import os
+import pathlib
 import socket
+import subprocess
+import sys
 import threading
 import weakref
+
+try:
+    import grp
+except ImportError:
+    grp = None
 
 SOCKET_NAME = "control.sock"
 MAX_MESSAGE = 1 << 20
@@ -56,12 +63,19 @@ def _give_group_access(path):
     Unpackaged installs may not have the group; root-only access then
     remains and clients get an actionable permission error.
     """
+    if grp is None or not hasattr(os, "chown"):
+        return
+    p = pathlib.Path(path)
     try:
         gid = grp.getgrnam(SOCKET_GROUP).gr_gid
-    except KeyError:
-        return
-    try:
         os.chown(path, -1, gid)
+    except (KeyError, OSError):
+        pass
+    try:
+        if p.is_dir():
+            os.chmod(path, 0o755)
+        else:
+            os.chmod(path, 0o666)
     except OSError:
         pass
 
@@ -124,28 +138,46 @@ class RpcServer:
         try:
             if os.path.exists(self.socket_path):
                 probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connected = False
                 try:
                     probe.settimeout(ACCEPT_TIMEOUT)
-                    probe.connect(self.socket_path)
+                    try:
+                        probe.connect(self.socket_path)
+                        connected = True
+                    except PermissionError as exc:
+                        hint = (
+                            f"cannot probe control socket {self.socket_path}: permission denied; "
+                            f"check permissions or run as Administrator"
+                            if sys.platform == "win32"
+                            else (
+                                f"cannot probe control socket {self.socket_path}: permission denied; "
+                                f"check that the runtime directory is owned accessibly ({SOCKET_GROUP} group?)"
+                            )
+                        )
+                        raise OSError(hint) from exc
+                    except (ConnectionRefusedError, FileNotFoundError):
+                        connected = False
+                    except OSError:
+                        # On Windows, WSAECONNREFUSED may raise generic OSError
+                        connected = False
+                finally:
+                    probe.close()
+
+                if connected:
                     raise OSError(
                         f"control socket {self.socket_path} is already served by another process"
                     )
-                except ConnectionRefusedError:
-                    # Stale file from a crashed daemon; the caller holds the
-                    # EC lock, so no live server can be attached to it.
-                    try:
-                        os.unlink(self.socket_path)
-                    except FileNotFoundError:
-                        pass
-                except PermissionError as exc:
-                    raise OSError(
-                        f"cannot probe control socket {self.socket_path}: permission denied; "
-                        f"check that the runtime directory is owned accessibly ({SOCKET_GROUP} group?)"
-                    ) from exc
-                finally:
-                    probe.close()
+                # Stale file from a crashed daemon; the caller holds the
+                # EC lock, so no live server can be attached to it.
+                try:
+                    os.unlink(self.socket_path)
+                except OSError:
+                    pass
             sock.bind(self.socket_path)
-            os.chmod(self.socket_path, 0o660)
+            try:
+                os.chmod(self.socket_path, 0o666)
+            except OSError:
+                pass
             _give_group_access(self.socket_path)
             _give_group_access(os.path.dirname(self.socket_path) or "/")
             sock.listen(4)
@@ -273,22 +305,27 @@ class RpcClient:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.connect(self.socket_path)
-        except FileNotFoundError as exc:
-            sock.close()
-            raise ConnectionError(
-                "fan-daemon is not running; start it with: systemctl start fan-daemon"
-            ) from exc
-        except ConnectionRefusedError as exc:
-            sock.close()
-            raise ConnectionError(
-                "fan-daemon is not running; start it with: systemctl start fan-daemon"
-            ) from exc
         except PermissionError as exc:
             sock.close()
-            raise PermissionError(
-                "cannot access the control socket; add your user to the "
-                "fan-control group (sudo usermod -aG fan-control $USER) and "
-                "re-login, or run the dashboard as root"
+            hint = (
+                "cannot access the control socket; check permissions or run as Administrator"
+                if sys.platform == "win32"
+                else (
+                    "cannot access the control socket; add your user to the "
+                    "fan-control group (sudo usermod -aG fan-control $USER) and "
+                    "re-login, or run the dashboard as root"
+                )
+            )
+            raise PermissionError(hint) from exc
+        except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+            sock.close()
+            start_hint = (
+                "net start fan-daemon (or run 'python fan-daemon.py')"
+                if sys.platform == "win32"
+                else "systemctl start fan-daemon"
+            )
+            raise ConnectionError(
+                f"fan-daemon is not running; start it with: {start_hint}"
             ) from exc
         sock.settimeout(SOCKET_TIMEOUT)
         self._sock = sock

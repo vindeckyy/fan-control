@@ -22,6 +22,9 @@ from fan_controller import FanController
 from fan_runtime import runtime_dir
 
 
+import tempfile
+
+
 def _headless_smoke(args):
     config_path = pathlib.Path(args.config)
     backend = DemoBackend() if args.demo else detect_backend(args.backend, args.device)
@@ -47,28 +50,45 @@ def _headless_smoke(args):
 
 
 def main():
+    default_config = os.environ.get(
+        "FAN_CONTROL_CONFIG",
+        str(pathlib.Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "fan-control" / "fan-control.json")
+        if sys.platform == "win32"
+        else "/etc/fan-control.json",
+    )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", action="store_true", help="run with simulated hardware")
     parser.add_argument("--debug", action="store_true", help="enable WebKit inspector")
     parser.add_argument("--headless-smoke", action="store_true", help="print one snapshot and exit")
     parser.add_argument("--tray", action="store_true", help="display-only tray; never locks the EC")
-    parser.add_argument("--config", default=os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json"))
+    parser.add_argument("--config", default=default_config)
     parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
-    parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "tuxedo_io", "clevo_acpi", "windows_ec", "windows_wmi"),
+        default="auto",
+    )
     parser.add_argument("--runtime-dir")
     args = parser.parse_args()
-    if args.demo and args.config == "/etc/fan-control.json" and "FAN_CONTROL_CONFIG" not in os.environ:
-        args.config = "/tmp/fan-control-demo.json"
+    if args.demo and args.config == default_config and "FAN_CONTROL_CONFIG" not in os.environ:
+        args.config = (
+            str(pathlib.Path(tempfile.gettempdir()) / "fan-control-demo.json")
+            if sys.platform == "win32"
+            else "/tmp/fan-control-demo.json"
+        )
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     if args.headless_smoke:
         try:
             _headless_smoke(args)
         except PermissionError:
-            sys.exit("need root")
+            sys.exit("need administrator privileges" if sys.platform == "win32" else "need root")
         except FileNotFoundError as exc:
             sys.exit(str(exc))
         return
-    from fan_gtk import run_application
+    if sys.platform == "win32":
+        from fan_windows_gui import run_application
+    else:
+        from fan_gtk import run_application
     raise SystemExit(run_application(args))
 
 

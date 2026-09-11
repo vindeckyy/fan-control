@@ -1,0 +1,7 @@
+# Optional Windows dependencies for native features
+# The app works out of the box with Python 3.10+ and standard Microsoft Edge.
+#
+# Install these for embedded Edge WebView2 and system tray support:
+pywebview>=4.0.0
+pystray>=0.19.0
+Pillow>=9.0.0

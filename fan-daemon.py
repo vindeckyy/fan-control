@@ -23,7 +23,12 @@ from fan_diagnostics import diagnose
 from fan_rpc import RpcServer
 from fan_runtime import ExclusiveLock, runtime_dir
 
-CONFIG_DEFAULT = os.environ.get("FAN_CONTROL_CONFIG", "/etc/fan-control.json")
+CONFIG_DEFAULT = os.environ.get(
+    "FAN_CONTROL_CONFIG",
+    str(pathlib.Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "fan-control" / "fan-control.json")
+    if sys.platform == "win32"
+    else "/etc/fan-control.json",
+)
 
 
 def _tick_loop(controller, stopped, interval, label="fan daemon"):
@@ -63,9 +68,14 @@ def _tick_loop(controller, stopped, interval, label="fan daemon"):
 
 def run(args):
     rdir = runtime_dir(demo=args.dry_run, override=args.runtime_dir)
+    default_data = (
+        str(pathlib.Path(os.environ.get("PROGRAMDATA", "C:\\ProgramData")) / "fan-control" / "data")
+        if sys.platform == "win32"
+        else "/var/lib/fan-control"
+    )
     data_dir = getattr(args, "data_dir", None) or (
         os.environ.get("FAN_CONTROL_DATA_DIR")
-        or (str(rdir) if args.dry_run else "/var/lib/fan-control")
+        or (str(rdir) if args.dry_run else default_data)
     )
 
     if args.dry_run:
@@ -131,7 +141,8 @@ def run(args):
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
-        signal.signal(signal.SIGHUP, reload)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, reload)
 
         print(
             f"fan daemon: backend={backend.name}, socket={server.socket_path}, interval={args.interval}s",
@@ -165,12 +176,16 @@ def main():
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--config", default=CONFIG_DEFAULT)
     parser.add_argument("--device", help="tuxedo_io device path (or set FAN_CONTROL_DEVICE)")
-    parser.add_argument("--backend", choices=("auto", "tuxedo_io", "clevo_acpi"), default="auto")
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "tuxedo_io", "clevo_acpi", "windows_ec", "windows_wmi"),
+        default="auto",
+    )
     parser.add_argument("--fans", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--dry-run", action="store_true", help="print decisions without opening the EC device")
     parser.add_argument("--diagnose", action="store_true", help="print system state and exit (no EC access)")
-    parser.add_argument("--runtime-dir", help="override /run/fan-control")
-    parser.add_argument("--data-dir", help="override /var/lib/fan-control (history database location)")
+    parser.add_argument("--runtime-dir", help="override runtime directory")
+    parser.add_argument("--data-dir", help="override data directory (history database location)")
     args = parser.parse_args()
 
     if args.diagnose:
@@ -181,7 +196,7 @@ def main():
     try:
         run(args)
     except PermissionError:
-        sys.exit("need root")
+        sys.exit("need administrator privileges" if sys.platform == "win32" else "need root")
     except FileNotFoundError as exc:
         sys.exit(str(exc))
     except (OSError, ValueError) as exc:

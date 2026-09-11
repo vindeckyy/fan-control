@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import io
+import os
 import pathlib
+import platform
 import subprocess
+import sys
 
 
 def find_cpu_sensor():
@@ -26,6 +29,38 @@ def diagnose(config_path):
 
     def p(*args):
         print(*args, file=buf)
+
+    if sys.platform == "win32":
+        p("Fan Control Windows Diagnostics")
+        p("================================")
+        p(f"platform  {platform.platform()} (Python {platform.python_version()})")
+        cfg = pathlib.Path(config_path)
+        p(f"config    {config_path}  {'exists' if cfg.exists() else 'no file'}")
+
+        drivers = {}
+        here = pathlib.Path(__file__).resolve().parent
+        windir = pathlib.Path(os.environ.get("WINDIR", "C:\\Windows"))
+        for dll_name in ("inpoutx64.dll", "inpout32.dll", "WinRing0x64.dll", "WinRing0.dll"):
+            found = False
+            for d in (here, pathlib.Path.cwd(), windir / "System32", windir / "SysWOW64"):
+                if (d / dll_name).is_file():
+                    found = True
+                    break
+            drivers[dll_name] = found
+        for dll, present in drivers.items():
+            p(f"  driver  {dll:16s}: {'found' if present else 'not found'}")
+
+        try:
+            nvidia_ok = subprocess.run(["nvidia-smi"], capture_output=True, timeout=5).returncode == 0
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            nvidia_ok = False
+        p(f"  nvidia  nvidia-smi:       {'available' if nvidia_ok else 'no'}")
+
+        if not any(drivers.values()):
+            p("  >>> no Windows fan-control EC driver found (inpoutx64.dll or WinRing0x64.dll).")
+            p("      For physical fan control, place inpoutx64.dll in the fan-control folder.")
+            p("      For testing without hardware, run with --demo.")
+        return buf.getvalue()
 
     mods = {}
     try:

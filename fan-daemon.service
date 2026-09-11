@@ -3,6 +3,7 @@ Description=Fan control daemon
 
 [Service]
 Type=simple
+ExecStartPre=/usr/local/lib/fan-control/prepare-ec.sh
 ExecStart=/usr/local/bin/fan-daemon --interval 2 --fans 2
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

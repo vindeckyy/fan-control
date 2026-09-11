@@ -148,7 +148,7 @@ class FanApplication(Gtk.Application):
             client = RpcClient(sock_path)
             try:
                 client.connect()
-            except ConnectionError:
+            except (ConnectionError, FileNotFoundError):
                 try:
                     subprocess.run(["systemctl", "start", "fan-daemon"], capture_output=True, timeout=30)
                 except (OSError, subprocess.SubprocessError):
