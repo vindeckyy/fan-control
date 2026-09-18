@@ -1,11 +1,13 @@
 # v2 verification
 
-Local verification on 2026-09-05. This is an unreleased working tree. After the
-initial checks, the user requested normal hardware mode and reported the old
-installed daemon could not connect. The source installation was backed up and
-upgraded to v2; broad hardware acceptance and release publication remain pending.
+Linux verification on 2026-09-05 and Windows port verification on 2026-09-18.
+This is an unreleased working tree. After the initial Linux checks, the user
+requested normal hardware mode and reported the old installed daemon could not
+connect; the source installation was backed up and upgraded to v2. The Windows
+port was later completed and exercised against real Uniwill/Tongfang hardware.
+Broad cross-model hardware acceptance and release publication remain pending.
 
-## Results
+## Linux results (2026-09-05)
 
 | Check | Result and evidence |
 | --- | --- |
@@ -23,6 +25,30 @@ upgraded to v2; broad hardware acceptance and release publication remain pending
 | Debian binary build | `dpkg-buildpackage -d -us -uc -b` succeeds in an isolated source copy with locally unpacked dh-python |
 | Version ordering | App and package versions synchronize at 2.0.0; package epoch 1 preserves upgrades from 2026.9.1 |
 
+## Windows results (2026-09-18)
+
+Verified on a Gateway GWTN156-2BK (Uniwill/Tongfang GK5NR0O firmware,
+`PROJECT_ID` 0x10, `BIOS_OEM_2` 0x9D) running Windows 11 (10.0.26200) and
+Python 3.12.10:
+
+| Check | Result and evidence |
+| --- | --- |
+| Python tests | 241 pass on Windows: 110 legacy, 118 v2, 13 Windows-specific (15 Linux-only tests skipped), through `python -m unittest` |
+| Static checks | `ruff check .` and `python scripts/check_versions.py` pass |
+| GUI headless smoke | `fan-gui.py --demo --headless-smoke` emits capabilities, live snapshot, mutation, decisions, and history |
+| GUI bridge | Live demo controller served over the loopback bridge; `/rpc` returned live telemetry and `/index.html` + `/bridge.js` served correctly |
+| Windows CI spec | PyInstaller spec builds `fan-control.exe`, `fan-ctl.exe`, and `fan-daemon.exe`; frozen GUI headless smoke returns exit 0 with full JSON output |
+| Backend detection | `windows_wmi` selected automatically; `available()` requires the exact `AcpiTest_MULong` class instead of generic `AcpiTest_*` matches |
+| EC probe | Read-only `GetSetULong` register dump via `AcpiTest_MULong` (project id, fan support bits, PWM, tach, temperatures) |
+| Manual fan writes | `windows_wmi` manual mode verified: 20% -> ~1620 RPM, 45% -> ~3290 RPM, 80% -> ~4945 RPM, 100% -> ~5337 RPM on both fans; `release()` returns EC automatic control |
+| Daemon end-to-end | Elevated daemon over the loopback RPC; unprivileged `fan-ctl` and Python clients changed duty and read live tachometers |
+| Service install | `install-service-windows.ps1` registered `FanControlDaemon` (SYSTEM, at startup) against the project `.venv`; uninstall unregisters and releases manual EC control |
+| Runtime IPC | Official CPython Windows builds do not expose `socket.AF_UNIX` on this system, so the loopback TCP port-file channel is the production path |
+
+The probe and write tests are reproducible with elevated, temporary scripts;
+no permanent register changes were left behind, and EC automatic control was
+restored after each test.
+
 The browser connector had no available browser. Browser acceptance used local
 Chromium/Selenium; the separate GTK smoke uses actual GTK4 and WebKitGTK 6.
 Screenshots are stored in [images/v2](images/v2/). They identify the backend as
@@ -34,11 +60,14 @@ the daemon modules and UI byte-for-byte at build time. This package predates the
 subsequent legacy-daemon compatibility message fix. Its version is `1:2.0.0-1`;
 SHA-256 is `d64a9e831ac58951896e0b3e955cc112af9250170453168533a48d29a77dbfa8`.
 
-The source install runs v2 on the host's `tuxedo_io` backend. RPC and the GTK
-window confirm live temperatures, preserved 27% manual fan targets, and healthy
-SQLite persistence. The backup is recorded in `HANDOFF.md`. Driver hardware
-checks identify Uniwill; no hwmon tachometer inputs are exposed. RPM remains
-unavailable because the existing backend has no verified Uniwill tach reader.
+The Linux source install runs v2 on the host's `tuxedo_io` backend. RPC and the
+GTK window confirm live temperatures, preserved 27% manual fan targets, and
+healthy SQLite persistence. The backup path was recorded locally on the Linux
+host during that work. Driver
+hardware checks identify Uniwill; no Linux hwmon tachometer inputs are exposed,
+so RPM remains unavailable on that Linux host. The Windows `windows_wmi`
+backend added in the port reads the documented Uniwill EC tach registers and
+returns RPM on the verified model.
 
 The daemon regressions cover configuration rollback and disk failures, v1
 backup preservation, safety on legacy manual writes, rule precedence, actual
@@ -52,6 +81,8 @@ browser harness complements these with rendered controls and screenshots.
 
 ## Reproduce
 
+Linux:
+
 ```sh
 make test
 ruff check .
@@ -59,6 +90,16 @@ python3 scripts/check_versions.py
 npm run build --prefix ui
 npm audit --omit=dev --prefix ui
 xvfb-run -a python3 scripts/gtk-smoke.py
+```
+
+Windows (PowerShell):
+
+```powershell
+python -m unittest -v
+ruff check .
+python scripts\check_versions.py
+python fan-gui.py --demo --headless-smoke
+pyinstaller --clean -y packaging\windows\fan-control-pyinstaller.spec
 ```
 
 Start `python3 scripts/ui-demo.py` in one terminal, then run
@@ -91,11 +132,15 @@ combination of hardware, desktop portal, assistive technology, or window size.
 
 - `run_command` is intentionally unavailable. RPC returns `UNSUPPORTED`; no
   privileged command runner or allowlist ships.
-- Tests use Python 3.14 locally. Python 3.10 syntax passes; the existing CI
-  matrix covers 3.10, 3.12, and 3.13 but was not executed remotely in this work.
-- Host manual targets and live telemetry were checked after source installation.
-  Physical cooling response and other model-specific firmware behavior have
-  not been tested here. Uniwill tach support remains deferred.
+- Tests use Python 3.14 locally on the Linux host and Python 3.12.10 on the
+  Windows host. Python 3.10 syntax passes; the existing CI matrix covers 3.10,
+  3.12, and 3.13, including a `windows-latest` job.
+- Linux host manual targets and live telemetry were checked after source
+  installation. The Windows `windows_wmi` manual writes, tachometer reads, EC
+  release, and unprivileged client control were verified on one
+  Uniwill/Tongfang model (Gateway GWTN156-2BK). Other Windows models and
+  physical cooling response remain untested. Uniwill tach support on Linux
+  hwmon is still deferred.
 - Tray integration, notification delivery, portal dialogs, and clipboard
   delivery need acceptance on supported desktop environments. Native smoke
   uses real Gio file writes with supplied destinations, bypassing the picker.

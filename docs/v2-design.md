@@ -1,6 +1,7 @@
 # v2 design decisions
 
-Direction comes from the user's v2 plan and the agreed design in HANDOFF.md.
+Direction comes from the user's v2 plan and the design dials agreed during the
+v2 work.
 Antislop applies during implementation, as requested by the user.
 
 ENERGY 1 / RHYTHM 2 / MOTION 1.

@@ -20,20 +20,22 @@ Fan Control provides automatic temperature curves, direct manual control,
 live CPU/GPU telemetry, dual-axis history graphs, and a native desktop
 window. The dashboard runs as a native desktop application (GTK4 + WebKitGTK 6
 on Linux, Edge WebView2 / pywebview on Windows) communicating with the daemon
-over a secure local socket; it does not require external cloud services.
+over a local control channel (Unix socket on Linux; loopback-only TCP on
+Windows when the Python build does not provide `AF_UNIX`); it does not require
+external cloud services.
 
 ## Features
 
-- Native desktop window (no localhost web server)
+- Native desktop window (WebKit custom scheme on Linux; loopback bridge bound to 127.0.0.1 on Windows)
 - Silent, Balanced, Performance, custom-curve, manual, and firmware-auto modes
 - Independent or linked CPU/GPU fan curves and targets
 - Visual curve editor with named import/export
 - Critical-temperature override that bypasses the user noise cap
 - Curve hysteresis to prevent rapid speed hunting
 - Automatic handoff to firmware when temperature data becomes unavailable
-- Live hwmon sensors with an NVIDIA `nvidia-smi` fallback and optional pinning
+- Live hwmon, ACPI thermal zone, and Uniwill EC sensors with an NVIDIA `nvidia-smi` fallback and optional pinning
 - Thirty-minute live telemetry and SQLite history with retention and CSV export
-- Read-only Clevo tach (RPM) when the backend exposes it; Uniwill tach is not probed
+- Fan tachometer (RPM) readouts where the backend exposes them, including the Uniwill/Tongfang EC tach on Windows
 - Persistent configuration with atomic writes
 - Dark/light/system themes, Celsius/Fahrenheit display, desktop notifications, tray controls, `fan-ctl` CLI
 - Dedicated Overview, Fans, Curves, Sensors, Analytics, Automation, Settings, and Diagnostics pages
@@ -50,13 +52,13 @@ one is present; use `--backend` or `FAN_CONTROL_BACKEND` to override.
 | --- | --- |
 | Hardware | Clevo/Tongfang-based system with a compatible EC interface |
 | Linux Backends | `tuxedo_io` (ioctls on a `/dev/*_io` device) or `clevo_acpi` (sysfs) |
-| Windows Backends | `windows_ec` (direct EC port I/O 0x62/0x66 via InpOutx64/WinRing0) or `windows_wmi` (ACPI WMI) |
+| Windows Backends | `windows_ec` (direct EC port I/O 0x62/0x66 via InpOutx64/WinRing0) or `windows_wmi` (Uniwill/Tongfang EC over ACPI WMI `AcpiTest_MULong`) |
 | Linux Desktop | GTK 4 and WebKitGTK 6 (`gir1.2-gtk-4.0`, `gir1.2-webkit-6.0`, `python3-gi`) |
 | Windows Desktop | Edge WebView2 (native app mode or via `pywebview`), with tray via `pystray` |
 | Runtime | Python 3.10 or newer |
 | Privileges | Root (Linux) or Administrator (Windows) for the daemon; desktop dashboard runs unprivileged |
 | Service manager | systemd (Linux) or Windows Task Scheduler / Service (Windows) |
-| Telemetry | Linux: hwmon sysfs. Windows: ACPI WMI thermal zones. Both: optional `nvidia-smi` |
+| Telemetry | Linux: hwmon sysfs. Windows: ACPI WMI thermal zones and Uniwill EC temperatures. Both: optional `nvidia-smi` |
 
 On Linux, the `tuxedo_io` backend drives duty through ioctls on a character device
 matching `/dev/*_io`. The `clevo_acpi` backend drives per-fan duty through
@@ -66,8 +68,13 @@ firmware auto if the controlling process stops.
 
 On Windows, the `windows_ec` backend communicates directly with the Embedded Controller
 (ports 0x66 command/status and 0x62 data) via standard I/O helper libraries
-(`inpoutx64.dll` or `WinRing0x64.dll`). The `windows_wmi` backend provides fallback
-ACPI thermal zone queries via PowerShell WMI/CIM.
+(`inpoutx64.dll` or `WinRing0x64.dll`). The `windows_wmi` backend talks to the
+Uniwill/Tongfang EC through the ACPI WMI `AcpiTest_MULong` interface (`GetSetULong`),
+the same channel the OEM control center uses. It provides EC temperatures, fan
+tachometers, and manual duty control on the EC's 0-200 scale; the daemon must run
+as Administrator, and `pythonnet` is required (`pip install -r requirements-windows.txt`).
+If no hardware driver is present, the daemon reports the actionable error instead
+of pretending to control fans.
 
 Hardware compatibility varies by model and firmware. Start with demo mode,
 then verify sensor readings and fan response before enabling the service.
@@ -85,11 +92,14 @@ Fan Control treats thermal control as a safety-critical path:
   system firmware until valid telemetry returns.
 - On the `clevo_acpi` backend, the kernel-side watchdog independently releases
   to firmware auto if the controlling process stops renewing a manual override.
-- The background daemon (`fan-daemon`) is the sole root owner of the EC
-  interface and runs continuously.
-- The dashboard window runs unprivileged as the desktop user. WebKit never
-  runs as root; it communicates with `fan-daemon` over a local Unix socket
-  restricted to the `fan-control` group (`0660 root:fan-control`).
+- The background daemon (`fan-daemon`) is the sole root/Administrator owner of
+  the EC interface and runs continuously.
+- The dashboard window runs unprivileged as the desktop user. On Linux, WebKit
+  never runs as root; it communicates with `fan-daemon` over a local Unix socket
+  restricted to the `fan-control` group (`0660 root:fan-control`). On Windows,
+  the dashboard serves the bundled UI over a loopback-only HTTP bridge bound to
+  `127.0.0.1` and talks to the elevated daemon over the loopback control
+  channel published in `%PROGRAMDATA%\fan-control\run`.
 - Safety-critical policy lives in Python (`fan_policy.py`), not in JavaScript.
 > [!CAUTION]
 > Confirm the reported temperatures and physical fan response on your exact
@@ -142,7 +152,7 @@ journalctl -u fan-daemon -n 50 --no-pager
 
 ### Windows setup & usage
 
-On Windows 10 (build 17063+ / version 1803+) and Windows 11, Python 3.10+ is supported. Windows natively supports `AF_UNIX` domain sockets, enabling the same zero-latency, secure IPC architecture as Linux.
+On Windows 10/11, Python 3.10+ is supported. IPC uses a loopback-only TCP control channel with the port published under `%PROGRAMDATA%\fan-control\run\control.sock`; on Python builds that provide `AF_UNIX`, a Unix-domain socket is used instead.
 
 #### Windows Executables (.exe)
 Native 64-bit Windows PE executables are provided:
@@ -169,9 +179,13 @@ fan-ctl.exe diagnose
 ```
 
 #### 3. Running the Daemon
-To control physical hardware, run the daemon from an elevated command prompt (Administrator):
+To control physical hardware, run the daemon from an elevated command prompt
+(Administrator). Auto-detection selects `windows_wmi` on Uniwill/Tongfang
+models; `fan-daemon.exe --backend windows_wmi` may be used explicitly:
 ```cmd
-fan-daemon.exe --backend windows_ec
+fan-daemon.exe
+fan-daemon.exe --backend windows_wmi
+fan-daemon.exe --dry-run
 ```
 *(Or use `scripts\run-daemon-windows.bat`)*
 
@@ -182,13 +196,27 @@ powershell -ExecutionPolicy Bypass -File scripts\install-service-windows.ps1
 ```
 *(To uninstall: `powershell -ExecutionPolicy Bypass -File scripts\install-service-windows.ps1 -Uninstall`)*
 
+The installer prefers the project `.venv` Python, installs `pythonnet` from
+`requirements-windows.txt` if it is missing, registers the `FanControlDaemon`
+scheduled task to run as SYSTEM at startup, and starts it immediately. On
+uninstall it releases manual EC fan control back to firmware before removing
+the task.
+
 #### 5. Building Windows Executables (.exe)
 - **Recompile Native Launchers**: Run `make windows-exe` (uses `x86_64-w64-mingw32-gcc` and `windres`).
 - **Create Standalone Portable Package**: Run `scripts\package-portable-windows.bat` to download official Python 3.12 embeddable and produce a zero-dependency `dist\fan-control-portable\` folder.
 - **Build PyInstaller Bundle**: Run `scripts\build-exe.bat` on Windows (uses `packaging\windows\fan-control-pyinstaller.spec`) to build frozen binaries in `dist\fan-control-windows\`.
 
-#### Hardware EC Port I/O Driver (Optional for direct fan control)
-For direct EC fan register read/write (`windows_ec`), ensure a standard user-mode I/O DLL such as `inpoutx64.dll` or `WinRing0x64.dll` is located in `%SystemRoot%\System32` or the project root. If no low-level driver is present, the daemon safely reports hardware status, or you can run with ACPI WMI fallback (`--backend windows_wmi`) or the simulated backend (`--backend demo`).
+#### Windows Hardware Control
+The daemon must run elevated (Administrator) to control fans. On Uniwill/Tongfang
+models it uses the ACPI WMI `AcpiTest_MULong` interface via `pythonnet`
+(`pip install -r requirements-windows.txt`). An error like "cannot access the
+Uniwill EC over WMI" means the daemon is not elevated; install it with
+`scripts\install-service-windows.ps1` or start it from an Administrator terminal.
+Alternatively, the `windows_ec` backend can drive the EC directly when a standard
+user-mode I/O DLL (`inpoutx64.dll` or `WinRing0x64.dll`) is placed in
+`%SystemRoot%\System32` or the project root. Use `--backend demo` for evaluation
+without hardware.
 
 ## Usage
 
@@ -244,7 +272,7 @@ fan-daemon --diagnose
 
 ## Configuration
 
-The daemon owns `/etc/fan-control.json` on Linux (or `%PROGRAMDATA%\fan-control\config.json` on Windows). Desktop and CLI controls submit RPC
+The daemon owns `/etc/fan-control.json` on Linux (or `%PROGRAMDATA%\fan-control\fan-control.json` on Windows). Desktop and CLI controls submit RPC
 mutations; they do not write this file directly. On Linux, the daemon reloads administrator
 edits on `SIGHUP` / `systemctl reload fan-daemon`.
 
@@ -304,7 +332,7 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
         │                               │                     │
         ├──── windows_ec port I/O ──────┤                     │
         │                               │                     │
-        ├──── windows_wmi ACPI ─────────┤                     │
+        ├──── windows_wmi EC (WMI) ─────┤                     │
         │                               │                     │
         └──── demo (simulated) ─────────┘                     │
                          │                                    │
@@ -312,12 +340,12 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
        firmware auto ◄── ownership handoff ◄── watchdog / release
 ```
 
-- `fan_backend.py`: hardware backends (Linux `tuxedo_io` / `clevo_acpi`, Windows `windows_ec` / `windows_wmi`, and cross-platform `demo`).
+- `fan_backend.py`: hardware backends (Linux `tuxedo_io` / `clevo_acpi`, Windows `windows_ec` direct port I/O / `windows_wmi` Uniwill EC over ACPI WMI, and cross-platform `demo`).
 - `fan_policy.py`: versioned configuration, migration, validation, curve math, and cross-platform sensor discovery.
 - `fan_engine.py` and `fan_rules.py`: pure control decisions, rules, and schedules.
 - `fan_history.py`: SQLite persistence, query aggregation, and memory fallback.
 - `fan_controller.py`: controller logic and JSON-RPC dispatch methods.
-- `fan_rpc.py`: Unix-socket JSON-RPC server and client (supported on Linux and Windows 10/11 build 17063+).
+- `fan_rpc.py`: JSON-RPC server and client (Unix socket on Linux, loopback TCP fallback on Windows).
 - `fan_diagnostics.py`: system and hardware diagnostics for Linux and Windows.
 - `fan_gtk.py`: unprivileged GTK4 + WebKitGTK 6 workspace and tray for Linux.
 - `fan_windows_gui.py`: native unprivileged desktop workspace (Edge WebView2 / pywebview) and tray (`pystray`) for Windows.
@@ -330,16 +358,51 @@ backend ┼──── tuxedo_io ioctls ─────────┤  ◄─�
 
 ### No fan-control hardware found
 
+Linux:
+
 ```bash
 sudo fan-daemon --diagnose
 sudo fan-ctl diagnose
 ```
 
+Windows (from an Administrator terminal for EC access):
+
+```cmd
+fan-daemon.exe --diagnose
+fan-ctl.exe diagnose
+```
+
+### Fan adjustments do nothing on Windows
+
+The daemon must run elevated to write the EC. Check that the daemon is
+reachable and using the hardware backend:
+
+```cmd
+fan-ctl.exe capabilities --json
+fan-ctl.exe status --json
+```
+
+`capabilities` should report `"backend": "windows_wmi"` (or `windows_ec`) and
+`status` should show `"daemon_reachable": true`. If not, install the
+background service (`scripts\install-service-windows.ps1` from PowerShell as
+Administrator) or start `fan-daemon.exe` elevated. An unelevated daemon now
+fails with an actionable error instead of silently ignoring writes.
+
+### Daemon is not reachable
+
+- Linux: `systemctl status fan-daemon`
+- Windows: the control port is published in
+  `%PROGRAMDATA%\fan-control\run\control.sock`; the scheduled task
+  `FanControlDaemon` should be running. Start it with
+  `schtasks /run /tn FanControlDaemon` from an elevated prompt, or reinstall
+  the service.
+
 ### Dashboard does not open
 
 Install GI bindings (`gir1.2-gtk-4.0`, `gir1.2-webkit-6.0`) and build the UI
 (`cd ui && npm ci && npm run build`). Run `python3 fan-gui.py --demo --debug`
-to enable the WebKit inspector.
+to enable the WebKit inspector. On Windows, `fan-control.exe --demo` runs
+without hardware or Administrator access.
 
 ### NVIDIA temperature is missing
 
@@ -349,12 +412,25 @@ nvidia-smi --query-gpu=index,temperature.gpu,name --format=csv,noheader,nounits
 
 ## Development
 
+Linux:
+
 ```bash
 python3 -m py_compile fan_backend.py fan_policy.py fan_runtime.py fan_controller.py fan-daemon.py fan-gui.py fan-ctl.py test_fan_control.py
 python3 -m unittest -v
 cd ui && npm ci && npm test && npm run build
 FAN_CONTROL_CONFIG=/tmp/fan-control-demo.json python3 fan-gui.py --demo
 ```
+
+Windows (PowerShell):
+
+```powershell
+python -m unittest -v
+python fan-gui.py --demo --headless-smoke
+pyinstaller --clean -y packaging\windows\fan-control-pyinstaller.spec
+```
+
+The full Python suite runs on Windows without elevated access; hardware tests
+are skipped or mocked unless a daemon is installed.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing hardware-facing
 changes. Security issues should follow [SECURITY.md](SECURITY.md).
@@ -400,6 +476,8 @@ uses epoch 1 so it sorts after the previous calendar-version packages.
 
 ### v2 verification
 
+Linux:
+
 ```bash
 make test
 ruff check .
@@ -410,9 +488,19 @@ python3 scripts/ui-demo.py
 python3 scripts/ui-acceptance.py
 ```
 
+Windows (PowerShell):
+
+```powershell
+python -m unittest -v
+ruff check .
+python scripts\check_versions.py
+python fan-gui.py --demo --headless-smoke
+```
+
 The acceptance harness uses isolated simulated hardware and produces
 screenshots under `docs/images/v2`. It is not the application's runtime
-transport. The native application continues to use the local Unix socket.
+transport. The native application continues to use the local control channel
+(Unix socket on Linux, loopback TCP on Windows).
 
 ![Overview with simulated telemetry](docs/images/v2/overview-dark.png)
 ![Curve Studio in light mode](docs/images/v2/curves-light.png)

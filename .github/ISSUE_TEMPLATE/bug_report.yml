@@ -19,8 +19,8 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Linux distribution, kernel version, and Python version.
-      placeholder: Ubuntu 24.04, Linux 6.11, Python 3.12
+      description: Operating system (Linux distribution and kernel, or Windows edition/build), Python version, and selected backend.
+      placeholder: Windows 11 24H2, Python 3.12, windows_wmi (or Ubuntu 24.04, Linux 6.11, tuxedo_io)
     validations:
       required: true
   - type: dropdown
