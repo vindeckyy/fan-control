@@ -2,9 +2,15 @@
 # PyInstaller spec file for Fan Control Windows Executables
 
 import os
+import pathlib
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
+
+try:
+    ROOT_DIR = str(pathlib.Path(SPECPATH).resolve().parent.parent)
+except NameError:
+    ROOT_DIR = str(pathlib.Path.cwd())
 
 # Common hidden imports across our modules
 hidden_imports = [
@@ -24,27 +30,32 @@ hidden_imports = [
     'msvcrt',
 ]
 
-# Optional Windows GUI / Tray dependencies
-for mod in ['webview', 'pystray', 'PIL']:
+# Optional Windows GUI / Tray / WMI dependencies
+for mod in ['webview', 'pystray', 'PIL', 'clr', 'pythonnet']:
     try:
         __import__(mod)
-        hidden_imports.extend(collect_submodules(mod))
+        for sub in collect_submodules(mod):
+            if 'android' not in sub and 'ios' not in sub:
+                hidden_imports.append(sub)
     except ImportError:
         pass
 
 # Static UI data files
 datas = []
-if os.path.isdir('ui/dist'):
-    datas.append(('ui/dist', 'ui/dist'))
-if os.path.isfile('packaging/icons/fan-control.ico'):
-    datas.append(('packaging/icons/fan-control.ico', 'packaging/icons'))
+ui_dist = os.path.join(ROOT_DIR, 'ui', 'dist')
+ico_path = os.path.join(ROOT_DIR, 'packaging', 'icons', 'fan-control.ico')
 
-icon_path = 'packaging/icons/fan-control.ico' if os.path.isfile('packaging/icons/fan-control.ico') else None
+if os.path.isdir(ui_dist):
+    datas.append((ui_dist, 'ui/dist'))
+if os.path.isfile(ico_path):
+    datas.append((ico_path, 'packaging/icons'))
+
+icon_file = ico_path if os.path.isfile(ico_path) else None
 
 # Analysis for GUI application (fan-gui.py)
 a_gui = Analysis(
-    ['fan-gui.py'],
-    pathex=['.'],
+    [os.path.join(ROOT_DIR, 'fan-gui.py')],
+    pathex=[ROOT_DIR],
     binaries=[],
     datas=datas,
     hiddenimports=hidden_imports,
@@ -74,13 +85,13 @@ exe_gui = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_path,
+    icon=icon_file,
 )
 
 # Analysis for CLI client (fan-ctl.py)
 a_ctl = Analysis(
-    ['fan-ctl.py'],
-    pathex=['.'],
+    [os.path.join(ROOT_DIR, 'fan-ctl.py')],
+    pathex=[ROOT_DIR],
     binaries=[],
     datas=[],
     hiddenimports=hidden_imports,
@@ -110,13 +121,13 @@ exe_ctl = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_path,
+    icon=icon_file,
 )
 
 # Analysis for Daemon (fan-daemon.py)
 a_daemon = Analysis(
-    ['fan-daemon.py'],
-    pathex=['.'],
+    [os.path.join(ROOT_DIR, 'fan-daemon.py')],
+    pathex=[ROOT_DIR],
     binaries=[],
     datas=[],
     hiddenimports=hidden_imports,
@@ -146,7 +157,7 @@ exe_daemon = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_path,
+    icon=icon_file,
 )
 
 # Collect all into a clean distribution folder

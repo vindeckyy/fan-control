@@ -18,17 +18,47 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 
 if ($Uninstall) {
     Write-Host "Removing Scheduled Task '$TaskName'..."
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+    try {
+        $obj = Get-CimInstance -Namespace root/wmi -ClassName AcpiTest_MULong -ErrorAction Stop | Select-Object -First 1
+        $read = Invoke-CimMethod -InputObject $obj -MethodName GetSetULong -Arguments @{ Data = [uint64]0x0000010000000751 }
+        $mode = [int]($read.Return -band 0xFF)
+        if ($mode -band 0x40) {
+            $data = [uint64](([int]($mode -band 0xBF) -shl 16) -bor 0x0751)
+            Invoke-CimMethod -InputObject $obj -MethodName GetSetULong -Arguments @{ Data = $data } | Out-Null
+            Write-Host "Released manual EC fan control; firmware automatic control restored."
+        }
+    } catch {
+        Write-Host "Note: could not release manual EC fan control automatically."
+    }
     Write-Host "Uninstallation complete."
     exit 0
 }
 
 if (-not $PythonPath) {
-    $pythonCmd = (Get-Command python.exe -ErrorAction SilentlyContinue)
-    if ($pythonCmd) {
-        $PythonPath = $pythonCmd.Source
+    $venvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
+    $venvPythonAlt = Join-Path $ProjectDir "venv\Scripts\python.exe"
+    if (Test-Path $venvPython) {
+        $PythonPath = $venvPython
+    } elseif (Test-Path $venvPythonAlt) {
+        $PythonPath = $venvPythonAlt
     } else {
-        $PythonPath = "python.exe"
+        $pythonCmd = (Get-Command python.exe -ErrorAction SilentlyContinue)
+        if ($pythonCmd) {
+            $PythonPath = $pythonCmd.Source
+        } else {
+            $PythonPath = "python.exe"
+        }
+    }
+}
+
+$RequirementsFile = Join-Path $ProjectDir "requirements-windows.txt"
+if ((Test-Path $RequirementsFile) -and ($PythonPath -ne "python.exe")) {
+    & $PythonPath -c "import clr" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Installing Python dependencies required for hardware control..."
+        & $PythonPath -m pip install --no-warn-script-location -r $RequirementsFile
     }
 }
 

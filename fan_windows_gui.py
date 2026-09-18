@@ -8,7 +8,6 @@ app mode, or the system browser.
 
 from __future__ import annotations
 
-import argparse
 import json
 import mimetypes
 import os
@@ -131,12 +130,15 @@ class _RpcClientAdapter:
         self.client.close()
 
 
-def _make_request_handler(rpc_adapter, dist_dir: pathlib.Path):
+def _make_request_handler(rpc_adapter, dist_dir: pathlib.Path, tracker: dict | None = None):
     class FanRequestHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass  # Silence HTTP server logs
 
         def do_GET(self):
+            if tracker is not None:
+                tracker["last_seen"] = time.time()
+                tracker["connected"] = True
             parsed = urllib.parse.urlparse(self.path)
             req_path = urllib.parse.unquote(parsed.path or "/").lstrip("/") or "index.html"
             if req_path.endswith("/"):
@@ -183,6 +185,9 @@ def _make_request_handler(rpc_adapter, dist_dir: pathlib.Path):
             self.wfile.write(content)
 
         def do_POST(self):
+            if tracker is not None:
+                tracker["last_seen"] = time.time()
+                tracker["connected"] = True
             if self.path != "/rpc":
                 self.send_error(404, "Not found")
                 return
@@ -221,6 +226,7 @@ class WindowsFanApp:
         self._tick_thread = None
         self._stop_event = threading.Event()
         self.port = 0
+        self.tracker = {"last_seen": time.time(), "connected": False}
 
     def setup(self):
         config_path = pathlib.Path(self.args.config)
@@ -239,12 +245,36 @@ class WindowsFanApp:
             try:
                 client.connect()
             except (ConnectionError, FileNotFoundError):
-                # Try starting service if installed
+                # 1. Try starting scheduled task or Windows service if registered
                 try:
-                    subprocess.run(["net", "start", "fan-daemon"], capture_output=True, timeout=15)
+                    subprocess.run(["schtasks", "/run", "/tn", "FanControlDaemon"], capture_output=True, timeout=5)
                 except (OSError, subprocess.SubprocessError):
                     pass
-                for _ in range(10):
+                try:
+                    subprocess.run(["net", "start", "fan-daemon"], capture_output=True, timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+
+                # 2. Try launching background daemon process if available
+                app_dir = pathlib.Path(__file__).resolve().parent
+                daemon_candidates = [
+                    app_dir / "fan-daemon.exe",
+                    pathlib.Path(sys.executable).resolve().parent / "fan-daemon.exe",
+                    app_dir / "fan-daemon.py",
+                ]
+                for cand in daemon_candidates:
+                    if cand.is_file():
+                        try:
+                            cflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+                            if cand.suffix == ".py":
+                                subprocess.Popen([sys.executable, str(cand)], creationflags=cflags)
+                            else:
+                                subprocess.Popen([str(cand)], creationflags=cflags)
+                            break
+                        except Exception:
+                            pass
+
+                for _ in range(12):
                     time.sleep(0.5)
                     try:
                         client.connect()
@@ -252,21 +282,41 @@ class WindowsFanApp:
                     except (ConnectionError, FileNotFoundError):
                         continue
                 else:
-                    raise RuntimeError(
-                        "fan-daemon is not running; start it with: net start fan-daemon or 'python fan-daemon.py'"
-                    )
+                    # 3. Fall back to in-process controller with detected hardware backend
+                    try:
+                        from fan_backend import detect_backend
+                        backend = detect_backend(getattr(self.args, "backend", "auto"))
+                        self.controller = FanController(
+                            backend=backend,
+                            config_path=config_path,
+                            runtime_dir=self.runtime,
+                            demo=False,
+                        )
+                        self.rpc_adapter = _InProcessAdapter(self.controller)
+                        self._start_ticker("inprocess-ticker")
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"fan-daemon is not running and in-process controller could not start: {exc}\n"
+                            "Fan control requires Administrator access. Start the background service "
+                            "(PowerShell as Administrator):\n"
+                            r"  powershell -ExecutionPolicy Bypass -File scripts\install-service-windows.ps1"
+                            "\n"
+                            "or launch fan-daemon.exe from an Administrator terminal."
+                        ) from exc
             except PermissionError as exc:
                 raise RuntimeError(str(exc)) from exc
-            self.rpc_adapter = _RpcClientAdapter(client)
+            if self.rpc_adapter is None:
+                self.rpc_adapter = _RpcClientAdapter(client)
 
         dist = ui_root()
-        handler = _make_request_handler(self.rpc_adapter, dist)
+        handler = _make_request_handler(self.rpc_adapter, dist, self.tracker)
         self._server = HTTPServer(("127.0.0.1", 0), handler)
         self.port = self._server.server_port
+        print(f"Serving UI at http://127.0.0.1:{self.port}/index.html", flush=True)
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
 
-    def _start_demo_ticker(self):
+    def _start_ticker(self, name="ticker"):
         def _loop():
             while not self._stop_event.is_set():
                 try:
@@ -278,8 +328,11 @@ class WindowsFanApp:
                     pass
                 self._stop_event.wait(0.5)
 
-        self._tick_thread = threading.Thread(target=_loop, name="demo-ticker", daemon=True)
+        self._tick_thread = threading.Thread(target=_loop, name=name, daemon=True)
         self._tick_thread.start()
+
+    def _start_demo_ticker(self):
+        self._start_ticker("demo-ticker")
 
     def close(self):
         self._stop_event.set()
@@ -300,10 +353,62 @@ class WindowsFanApp:
     def run_window(self):
         url = f"http://127.0.0.1:{self.port}/index.html"
 
-        # 1. Try pywebview if installed (native embedded WebView2)
+        # 1. Try Microsoft Edge or Chrome in standalone application mode (--app)
+        # Dedicated window without browser tabs/toolbars, isolated profile, exactly like native desktop app
+        browser_candidates = [
+            pathlib.Path("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"),
+            pathlib.Path("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"),
+            pathlib.Path("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
+            pathlib.Path("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"),
+        ]
+        app_browser = None
+        for cand in browser_candidates:
+            if cand.is_file():
+                app_browser = str(cand)
+                break
+        if not app_browser:
+            app_browser = shutil.which("msedge") or shutil.which("chrome")
+
+        if app_browser:
+            profile_dir = pathlib.Path(tempfile.gettempdir()) / f"fan-control-app-profile-{os.getpid()}"
+            cmd = [
+                app_browser,
+                f"--app={url}",
+                f"--user-data-dir={profile_dir}",
+                "--window-size=1280,800",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ]
+            try:
+                proc = subprocess.Popen(cmd)
+                # If Edge runs as a dedicated process, proc.poll() is None until closed.
+                # If Edge delegates to an existing instance, proc exits immediately but tracker detects active UI.
+                grace_period_end = time.time() + 15.0
+                while not self._stop_event.is_set():
+                    time.sleep(0.5)
+                    if proc.poll() is None:
+                        continue
+                    # Process exited. If a client connected and was active, wait until window closed (no requests for 3s).
+                    if self.tracker.get("connected"):
+                        idle = time.time() - self.tracker.get("last_seen", 0)
+                        if idle > 3.0:
+                            break
+                    elif time.time() > grace_period_end:
+                        # Process exited and no UI connected within 15 seconds
+                        break
+                return 0
+            except (OSError, subprocess.SubprocessError):
+                pass
+            finally:
+                try:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+        # 2. Try pywebview if installed (native embedded WebView2)
         try:
             import webview
-            window = webview.create_window(
+            webview.create_window(
                 APP_TITLE,
                 url,
                 width=1280,
@@ -313,38 +418,8 @@ class WindowsFanApp:
             )
             webview.start(debug=bool(self.args.debug))
             return 0
-        except ImportError:
+        except (ImportError, Exception):
             pass
-
-        # 2. Try Microsoft Edge in application mode (--app)
-        edge_candidates = [
-            pathlib.Path("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"),
-            pathlib.Path("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"),
-        ]
-        edge_path = None
-        for cand in edge_candidates:
-            if cand.is_file():
-                edge_path = str(cand)
-                break
-        if not edge_path:
-            edge_path = shutil.which("msedge")
-
-        if edge_path:
-            profile_dir = pathlib.Path(tempfile.gettempdir()) / "fan-control-edge-profile"
-            cmd = [
-                edge_path,
-                f"--app={url}",
-                f"--user-data-dir={profile_dir}",
-                "--window-size=1280,800",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ]
-            try:
-                proc = subprocess.Popen(cmd)
-                proc.wait()
-                return 0
-            except (OSError, subprocess.SubprocessError):
-                pass
 
         # 3. Fallback: open default web browser
         import webbrowser
@@ -373,8 +448,9 @@ class WindowsFanApp:
         def create_icon_image():
             img = Image.new("RGBA", (64, 64), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
-            draw.ellipse((4, 4, 60, 60), fill=(40, 120, 240, 255))
-            draw.ellipse((20, 20, 44, 44), fill=(255, 255, 255, 255))
+            draw.ellipse((8, 8, 56, 56), fill=(40, 160, 240, 255), outline=(255, 255, 255, 255), width=2)
+            draw.line((32, 12, 32, 52), fill=(255, 255, 255, 255), width=3)
+            draw.line((12, 32, 52, 32), fill=(255, 255, 255, 255), width=3)
             return img
 
         def set_profile(profile_name):
@@ -431,7 +507,13 @@ def run_application(args) -> int:
             return app.run_tray()
         return app.run_window()
     except Exception as exc:
-        print(f"Error starting Fan Control: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, f"Error starting Fan Control:\n\n{exc}", "Fan Control Error", 0x10)
+        except Exception:
+            pass
         return 1
     finally:
         app.close()

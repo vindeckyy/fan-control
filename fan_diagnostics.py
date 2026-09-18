@@ -56,7 +56,25 @@ def diagnose(config_path):
             nvidia_ok = False
         p(f"  nvidia  nvidia-smi:       {'available' if nvidia_ok else 'no'}")
 
-        if not any(drivers.values()):
+        try:
+            import fan_backend
+            wmi_ok = fan_backend.WindowsWmiBackend.available()
+        except Exception:
+            wmi_ok = False
+        p(f"  backend wmi (clevo/tongfang): {'available' if wmi_ok else 'no'}")
+
+        try:
+            import fan_policy
+            recs = fan_policy.scan_sensor_records(include_nvidia=True)
+            cpu = fan_policy.pick_cpu_temp(recs)
+            gpu = fan_policy.pick_gpu_temp(recs)
+            p(f"  sensors discovered:       {len(recs)}")
+            p(f"  cpu     temperature:      {cpu if cpu is not None else 'not detected'} C")
+            p(f"  gpu     temperature:      {gpu if gpu is not None else 'not detected'} C")
+        except Exception as exc:
+            p(f"  sensors error:            {exc}")
+
+        if not any(drivers.values()) and not wmi_ok:
             p("  >>> no Windows fan-control EC driver found (inpoutx64.dll or WinRing0x64.dll).")
             p("      For physical fan control, place inpoutx64.dll in the fan-control folder.")
             p("      For testing without hardware, run with --demo.")

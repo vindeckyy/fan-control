@@ -6,6 +6,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -16,10 +17,8 @@ if str(ROOT) not in sys.path:
 import fan_backend as backend
 import fan_diagnostics as diagnostics
 import fan_policy as policy
-import fan_rpc as rpc
 import fan_runtime as runtime
 import fan_windows_gui as win_gui
-from fan_controller import FanController
 
 
 class WindowsRuntimeTests(unittest.TestCase):
@@ -68,8 +67,9 @@ class WindowsBackendTests(unittest.TestCase):
         mock_dll = mock.MagicMock()
         mock_dll.DlPortReadPortUchar.return_value = 0  # IBF = 0, OBF = 0
 
+        dll_mock_target = "ctypes.WinDLL" if sys.platform == "win32" else "ctypes.CDLL"
         with mock.patch.object(backend.WindowsEcBackend, "find_driver_dll", return_value="dummy_inpoutx64.dll"), \
-             mock.patch("ctypes.CDLL", return_value=mock_dll):
+             mock.patch(dll_mock_target, return_value=mock_dll):
             ec = backend.WindowsEcBackend("dummy_inpoutx64.dll")
             self.assertEqual(ec.fans(), [1, 2, 3])
 
@@ -87,12 +87,74 @@ class WindowsBackendTests(unittest.TestCase):
             ec.close()
 
     def test_windows_wmi_backend(self):
-        wmi_be = backend.WindowsWmiBackend()
+        class FakeTransport:
+            def __init__(self):
+                self.regs = {
+                    0x043E: 63,
+                    0x044F: 50,
+                    0x0751: 0x00,
+                    0x1804: 100,
+                    0x1809: 80,
+                    0x0464: 0x0C,
+                    0x0465: 0xD1,
+                    0x046C: 0x0C,
+                    0x046D: 0x30,
+                }
+                self.writes = []
+                self.closed = False
+
+            def read(self, addr):
+                return self.regs.get(addr, 0)
+
+            def write(self, addr, value):
+                self.regs[addr] = value & 0xFF
+                self.writes.append((addr, value & 0xFF))
+
+            def close(self):
+                self.closed = True
+
+        fake = FakeTransport()
+        wmi_be = backend.WindowsWmiBackend(transport=fake)
         self.assertEqual(wmi_be.fans(), [1, 2])
-        wmi_be.lock()
+        self.assertEqual(wmi_be.read_temp(), 63.0)
+        self.assertEqual(wmi_be.read_temp2(), 50.0)
+        self.assertEqual(wmi_be.read_rpm(1), 0x0CD1)
+        self.assertEqual(wmi_be.read_rpm(2), 0x0C30)
+        self.assertIsNone(wmi_be.read_rpm(3))
+        self.assertEqual(wmi_be.read_duty(1), 50)
+
         wmi_be.write_duty(1, 65)
+        self.assertEqual(fake.regs[0x0751], backend.WindowsWmiBackend.EC_MANUAL_BIT)
+        self.assertEqual(fake.regs[0x1804], 130)
         self.assertEqual(wmi_be.read_duty(1), 65)
+
+        wmi_be.write_duty(2, 25)
+        self.assertEqual(fake.regs[0x1809], 50)
+        self.assertEqual(wmi_be.read_duty(2), 25)
+
         wmi_be.release()
+        self.assertEqual(fake.regs[0x0751] & 0x40, 0)
+
+        with self.assertRaises(backend.FanBackendError):
+            wmi_be.write_duty(1, "invalid")
+        with self.assertRaises(backend.FanBackendError):
+            wmi_be.write_duty(3, 50)
+
+        wmi_be.close()
+        self.assertTrue(fake.closed)
+
+    def test_windows_wmi_available_requires_exact_class(self):
+        found = mock.MagicMock(returncode=0, stdout="AcpiTest_MULong\n")
+        missing = mock.MagicMock(returncode=0, stdout="")
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch("subprocess.run", return_value=found) as run:
+            self.assertTrue(backend.WindowsWmiBackend.available())
+            self.assertIn("-ClassName AcpiTest_MULong", run.call_args[0][0][-1])
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch("subprocess.run", return_value=missing):
+            self.assertFalse(backend.WindowsWmiBackend.available())
+        with mock.patch.object(sys, "platform", "linux"):
+            self.assertFalse(backend.WindowsWmiBackend.available())
 
     def test_detect_backend_windows(self):
         with mock.patch.object(sys, "platform", "win32"):
@@ -124,6 +186,7 @@ class WindowsSensorTests(unittest.TestCase):
         mock_proc.stdout = sample_ps
 
         with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(policy, "_scan_wmi_thermal_zones_clr", return_value=None), \
              mock.patch("subprocess.run", return_value=mock_proc), \
              mock.patch("shutil.which", return_value=None):
             records = policy.scan_sensor_records(demo=False, include_nvidia=False)
@@ -131,10 +194,41 @@ class WindowsSensorTests(unittest.TestCase):
             # 3252 raw Kelvin tenths = 325.2 K = 52.0 °C
             self.assertEqual(records[0]["temp"], 52.0)
             self.assertEqual(records[0]["name"], "acpi")
+            self.assertIn("cpu", records[0]["aliases"])
+            self.assertEqual(policy.pick_cpu_temp(records), 52.0)
 
             sensors = policy.scan_sensors(demo=False, include_nvidia=False)
             self.assertEqual(len(sensors), 2)
             self.assertEqual(sensors[0]["temp"], 52.0)
+
+    def test_windows_sensor_scanning_clr(self):
+        fake_zones = [("\\_SB.ECTZ", 65.5)]
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(policy, "_scan_wmi_thermal_zones_clr", return_value=fake_zones), \
+             mock.patch("shutil.which", return_value=None):
+            records = policy.scan_sensor_records(demo=False, include_nvidia=False)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["temp"], 65.5)
+            self.assertEqual(records[0]["label"], "CPU (ECTZ)")
+            self.assertIn("cpu", records[0]["aliases"])
+            self.assertEqual(policy.pick_cpu_temp(records), 65.5)
+
+    def test_windows_sensor_scanning_3_field_ps(self):
+        sample_ps = "\\_SB.ECTZ|3462|346\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = sample_ps
+
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(policy, "_scan_wmi_thermal_zones_clr", return_value=None), \
+             mock.patch("subprocess.run", return_value=mock_proc), \
+             mock.patch("shutil.which", return_value=None):
+            records = policy.scan_sensor_records(demo=False, include_nvidia=False)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["temp"], 73.0)
+            self.assertEqual(records[0]["label"], "CPU (ECTZ)")
+            self.assertIn("cpu", records[0]["aliases"])
+            self.assertEqual(policy.pick_cpu_temp(records), 73.0)
 
 
 class WindowsDiagnosticsTests(unittest.TestCase):
@@ -162,7 +256,7 @@ class WindowsGuiBridgeTests(unittest.TestCase):
             handler_cls = win_gui._make_request_handler(mock_adapter, dist_dir)
             server = win_gui.HTTPServer(("127.0.0.1", 0), handler_cls)
             port = server.server_port
-            t = mock.threading.Thread(target=server.serve_forever, daemon=True)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
             t.start()
 
             import urllib.request

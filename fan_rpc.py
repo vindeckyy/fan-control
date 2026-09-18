@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Unix-socket JSON-RPC surface shared by the daemon, GUI, tray, and CLI.
+"""JSON-RPC surface shared by the daemon, GUI, tray, and CLI.
 
 The daemon is the only root EC owner. Privileged mutations and telemetry
 reach unprivileged clients (fan-gui, the tray, fan-ctl) through a single
 root-owned Unix socket carrying one JSON request per line and one JSON
 reply per line: ``{"method": ..., "params": {...}}`` ->
 ``{"ok": true, "result": ...}`` or ``{"ok": false, "error": "..."}``.
+Where the Python build does not provide ``AF_UNIX`` (official Windows
+builds), the same line protocol runs over a loopback TCP socket whose
+port is published in the runtime directory.
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ import json
 import os
 import pathlib
 import socket
-import subprocess
 import sys
 import threading
 import weakref
@@ -30,6 +32,7 @@ MAX_MESSAGE = 1 << 20
 SOCKET_GROUP = "fan-control"
 ACCEPT_TIMEOUT = 0.5
 SOCKET_TIMEOUT = 10.0
+_USE_AF_UNIX = hasattr(socket, "AF_UNIX")
 
 # Stable machine-readable error codes (RPC v2). The frontend branches on the
 # code, never on the human-readable message.
@@ -134,58 +137,93 @@ class RpcServer:
         self._error = None
 
     def _setup(self):
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            if os.path.exists(self.socket_path):
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                connected = False
-                try:
-                    probe.settimeout(ACCEPT_TIMEOUT)
+        if _USE_AF_UNIX:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                if os.path.exists(self.socket_path):
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    connected = False
                     try:
-                        probe.connect(self.socket_path)
-                        connected = True
-                    except PermissionError as exc:
-                        hint = (
-                            f"cannot probe control socket {self.socket_path}: permission denied; "
-                            f"check permissions or run as Administrator"
-                            if sys.platform == "win32"
-                            else (
+                        probe.settimeout(ACCEPT_TIMEOUT)
+                        try:
+                            probe.connect(self.socket_path)
+                            connected = True
+                        except PermissionError as exc:
+                            hint = (
                                 f"cannot probe control socket {self.socket_path}: permission denied; "
                                 f"check that the runtime directory is owned accessibly ({SOCKET_GROUP} group?)"
                             )
-                        )
-                        raise OSError(hint) from exc
-                    except (ConnectionRefusedError, FileNotFoundError):
-                        connected = False
-                    except OSError:
-                        # On Windows, WSAECONNREFUSED may raise generic OSError
-                        connected = False
-                finally:
-                    probe.close()
+                            raise OSError(hint) from exc
+                        except (ConnectionRefusedError, FileNotFoundError):
+                            connected = False
+                        except OSError:
+                            connected = False
+                    finally:
+                        probe.close()
 
-                if connected:
-                    raise OSError(
-                        f"control socket {self.socket_path} is already served by another process"
-                    )
-                # Stale file from a crashed daemon; the caller holds the
-                # EC lock, so no live server can be attached to it.
+                    if connected:
+                        raise OSError(
+                            f"control socket {self.socket_path} is already served by another process"
+                        )
+                    # Stale file from a crashed daemon; the caller holds the
+                    # EC lock, so no live server can be attached to it.
+                    try:
+                        os.unlink(self.socket_path)
+                    except OSError:
+                        pass
+                sock.bind(self.socket_path)
                 try:
-                    os.unlink(self.socket_path)
+                    os.chmod(self.socket_path, 0o666)
                 except OSError:
                     pass
-            sock.bind(self.socket_path)
+                _give_group_access(self.socket_path)
+                _give_group_access(os.path.dirname(self.socket_path) or "/")
+                sock.listen(4)
+                sock.settimeout(ACCEPT_TIMEOUT)
+                return sock
+            except BaseException:
+                sock.close()
+                raise
+        else:
+            path = pathlib.Path(self.socket_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_file():
+                port = None
+                try:
+                    port = int(path.read_text().strip())
+                except (ValueError, OSError):
+                    port = None
+                if port is not None:
+                    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    connected = False
+                    try:
+                        probe.settimeout(ACCEPT_TIMEOUT)
+                        probe.connect(("127.0.0.1", port))
+                        connected = True
+                    except OSError:
+                        connected = False
+                    finally:
+                        probe.close()
+                    if connected:
+                        raise OSError(
+                            f"control socket {self.socket_path} is already served by another process"
+                        )
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                os.chmod(self.socket_path, 0o666)
-            except OSError:
-                pass
-            _give_group_access(self.socket_path)
-            _give_group_access(os.path.dirname(self.socket_path) or "/")
-            sock.listen(4)
-            sock.settimeout(ACCEPT_TIMEOUT)
-            return sock
-        except BaseException:
-            sock.close()
-            raise
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+                path.write_text(str(port))
+                sock.listen(4)
+                sock.settimeout(ACCEPT_TIMEOUT)
+                return sock
+            except BaseException:
+                sock.close()
+                raise
 
     def serve_forever(self, ready_event=None):
         """Blocking accept loop. Raises if the socket cannot be created."""
@@ -302,9 +340,29 @@ class RpcClient:
             self._connect()
 
     def _connect(self):
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if _USE_AF_UNIX:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            target = self.socket_path
+        else:
+            path = pathlib.Path(self.socket_path)
+            if not path.is_file():
+                start_hint = (
+                    "net start fan-daemon (or run 'python fan-daemon.py')"
+                    if sys.platform == "win32"
+                    else "systemctl start fan-daemon"
+                )
+                raise ConnectionError(
+                    f"fan-daemon is not running; start it with: {start_hint}"
+                )
+            try:
+                port = int(path.read_text().strip())
+            except (ValueError, OSError) as exc:
+                raise ConnectionError(f"invalid control port file {self.socket_path}: {exc}") from exc
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            target = ("127.0.0.1", port)
+
         try:
-            sock.connect(self.socket_path)
+            sock.connect(target)
         except PermissionError as exc:
             sock.close()
             hint = (

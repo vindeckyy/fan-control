@@ -16,7 +16,8 @@ from fan_backend import MAX_DUTY_PERCENT, migrate_config
 
 SAFE_MAX_DUTY = MAX_DUTY_PERCENT
 FAULT_MISS_THRESHOLD = 3
-CPU_CHIPS = ("k10temp", "coretemp", "zenpower")
+CPU_CHIPS = ("k10temp", "coretemp", "zenpower", "acpi", "thermalzone", "ectz", "cpu")
+CPU_NAME_HINTS = ("cpu", "k10temp", "coretemp", "zenpower", "acpi", "thermalzone", "ectz")
 GPU_CHIPS = ("amdgpu", "radeon", "nouveau", "i915", "xe")
 GPU_NAME_HINTS = ("nvidia", "amdgpu", "radeon", "nouveau", "intel_gpu", "gpu")
 
@@ -139,7 +140,24 @@ def pick_cpu_temp(sensors, pin=None, ec_fallback=None):
         for sensor in sensors:
             if _sensor_matches(sensor, pin) and _valid_temp(sensor.get("temp")):
                 return float(sensor["temp"])
-    cpu = [sensor["temp"] for sensor in sensors if sensor.get("name") in CPU_CHIPS and _valid_temp(sensor.get("temp"))]
+    cpu = [
+        sensor["temp"]
+        for sensor in sensors
+        if (
+            sensor.get("name") in CPU_CHIPS
+            or "cpu" in sensor.get("aliases", ())
+            or any(hint in str(sensor.get("name", "")).lower() for hint in CPU_NAME_HINTS)
+            or any(hint in str(sensor.get("channel", "")).lower() for hint in ("cpu", "ectz"))
+            or any(hint in str(sensor.get("label", "")).lower() for hint in ("cpu", "ectz", "thermalzone"))
+        )
+        and _valid_temp(sensor.get("temp"))
+        and not (
+            sensor.get("name") in GPU_CHIPS
+            or any(hint in str(sensor.get("name", "")).lower() for hint in GPU_NAME_HINTS)
+            or "gpu" in str(sensor.get("label", "")).lower()
+            or "gpu" in sensor.get("aliases", ())
+        )
+    ]
     if cpu:
         return max(cpu)
     return float(ec_fallback) if _valid_temp(ec_fallback) else None
@@ -1001,12 +1019,23 @@ def _hwmon_device_id(hwmon_path):
 
 def _record_from_value(name, label, value, *, sensor_id, channel, source, runtime_path, hwmon_index=None):
     aliases = []
-    if name in CPU_CHIPS:
+    name_lower = str(name).lower()
+    label_lower = str(label).lower()
+    channel_lower = str(channel).lower()
+    if (
+        name in CPU_CHIPS
+        or any(hint in name_lower for hint in CPU_NAME_HINTS)
+        or "cpu" in label_lower
+        or "ectz" in label_lower
+        or "cpu" in channel_lower
+        or (name == "acpi" and not ("gpu" in label_lower or "gpu" in channel_lower))
+    ):
         aliases.append("cpu")
     if (
         name in GPU_CHIPS
-        or any(hint in str(name).lower() for hint in GPU_NAME_HINTS)
-        or "gpu" in str(label).lower()
+        or any(hint in name_lower for hint in GPU_NAME_HINTS)
+        or "gpu" in label_lower
+        or "gpu" in channel_lower
     ):
         aliases.append("gpu")
     return {
@@ -1069,6 +1098,31 @@ def parse_nvidia_smi_records(output):
     return records
 
 
+def _scan_wmi_thermal_zones_clr():
+    """Attempt fast in-process WMI thermal zone query via pythonnet."""
+    try:
+        import clr
+        clr.AddReference("System.Management")
+        from System.Management import ManagementObjectSearcher
+        searcher = ManagementObjectSearcher(
+            "SELECT Name, HighPrecisionTemperature, Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation"
+        )
+        zones = []
+        for item in searcher.Get():
+            name = str(item["Name"] or "")
+            hp = item["HighPrecisionTemperature"]
+            t = item["Temperature"]
+            raw_hp = float(hp) if hp is not None else 0
+            raw_t = float(t) if t is not None else 0
+            if raw_hp > 2732:
+                zones.append((name, round((raw_hp - 2732) / 10.0, 1)))
+            elif raw_t > 273:
+                zones.append((name, round(raw_t - 273.0, 1)))
+        return zones if zones else None
+    except Exception:
+        return None
+
+
 def _scan_sensor_records_windows(include_nvidia=True):
     """Discover temperature sensors on Windows with stable persistent identities."""
     import shutil
@@ -1077,45 +1131,67 @@ def _scan_sensor_records_windows(include_nvidia=True):
     records = []
     seen_ids = set()
 
-    # 1. ACPI thermal zones via PowerShell CIM / WMI
-    try:
+    # 1. ACPI thermal zones via fast in-process CLR or PowerShell CIM / WMI fallback
+    zones = _scan_wmi_thermal_zones_clr()
+    if zones is None:
         ps_cmd = (
-            "$ErrorActionPreference='SilentlyContinue'; "
-            "Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | "
-            "ForEach-Object { $_.InstanceName + '|' + $_.CurrentTemperature }"
+            "try { Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation | ForEach-Object { $_.Name + '|' + $_.HighPrecisionTemperature + '|' + $_.Temperature } } catch {}; "
+            "try { Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | ForEach-Object { $_.InstanceName + '|' + $_.CurrentTemperature } } catch {}; "
+            "exit 0"
         )
-        res = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=3, check=False,
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            for line in res.stdout.splitlines():
-                line = line.strip()
-                if not line or "|" not in line:
-                    continue
-                parts = line.split("|", 1)
-                inst, temp_raw = parts[0].strip(), parts[1].strip()
-                try:
-                    raw_k = float(temp_raw)
-                    temp_c = (raw_k - 2732) / 10.0
-                    if 0 < temp_c <= 150:
-                        clean_id = inst.replace("\\", "_").replace(":", "_").replace(" ", "_").lower()
-                        label = inst.split("\\")[-1] or inst
-                        sensor_id = f"wmi:acpi:{clean_id}:temp"
-                        if sensor_id in seen_ids:
-                            sensor_id = f"{sensor_id}~{len(records)}"
-                        seen_ids.add(sensor_id)
-                        records.append(_record_from_value(
-                            "acpi", f"ThermalZone {label}", round(temp_c, 1),
-                            sensor_id=sensor_id,
-                            channel="acpi",
-                            source="wmi",
-                            runtime_path=None,
-                        ))
-                except (ValueError, TypeError):
-                    continue
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        pass
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            zones = []
+            if res.stdout.strip():
+                for line in res.stdout.splitlines():
+                    parts = [p.strip() for p in line.strip().split("|")]
+                    if len(parts) >= 3:
+                        name, hp, t = parts[0], parts[1], parts[2]
+                        try:
+                            raw_hp = float(hp) if hp else 0
+                            raw_t = float(t) if t else 0
+                            if raw_hp > 2732:
+                                zones.append((name, round((raw_hp - 2732) / 10.0, 1)))
+                            elif raw_t > 273:
+                                zones.append((name, round(raw_t - 273.0, 1)))
+                        except ValueError:
+                            pass
+                    elif len(parts) == 2:
+                        name, cur = parts[0], parts[1]
+                        try:
+                            raw_k = float(cur)
+                            temp_c = (raw_k - 2732) / 10.0
+                            if 0 < temp_c <= 150:
+                                zones.append((name, round(temp_c, 1)))
+                        except ValueError:
+                            pass
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            zones = []
+
+    for inst, temp_c in (zones or []):
+        if not (0 < temp_c <= 150):
+            continue
+        clean_id = inst.replace("\\", "_").replace(":", "_").replace(" ", "_").strip("_").lower()
+        zone_tag = inst.split("\\")[-1].lstrip("_") or inst
+        if zone_tag.upper().startswith("SB."):
+            zone_tag = zone_tag[3:]
+        is_cpu = any(tok in clean_id for tok in ("ectz", "cpu", "tz")) or len(zones) == 1
+        label = f"CPU ({zone_tag})" if ("ectz" in clean_id or "cpu" in clean_id) else f"ThermalZone {zone_tag}"
+        channel = "cpu" if is_cpu else "acpi"
+        sensor_id = f"wmi:acpi:{clean_id}:temp"
+        if sensor_id in seen_ids:
+            sensor_id = f"{sensor_id}~{len(records)}"
+        seen_ids.add(sensor_id)
+        records.append(_record_from_value(
+            "acpi", label, round(temp_c, 1),
+            sensor_id=sensor_id,
+            channel=channel,
+            source="wmi",
+            runtime_path=None,
+        ))
 
     # 2. NVIDIA GPU via nvidia-smi
     if include_nvidia and not any(rec["name"] == "nvidia" for rec in records):

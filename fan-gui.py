@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Native WebKitGTK dashboard for Clevo/Tongfang fan control."""
+"""Dashboard entry point for Clevo/Tongfang fan control.
+
+Dispatches to the GTK4 + WebKitGTK workspace on Linux and to the native
+Windows runner (Edge app window / pywebview / system browser) on Windows.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import os
 import pathlib
 import signal
 import sys
+import tempfile
 
 _ROOT = pathlib.Path(__file__).resolve().parent
 for _candidate in (_ROOT, pathlib.Path("/usr/local/lib/fan-control"), pathlib.Path("/usr/lib/fan-control")):
@@ -22,7 +27,30 @@ from fan_controller import FanController
 from fan_runtime import runtime_dir
 
 
-import tempfile
+def _write_console(text):
+    """Write CLI output, attaching or creating a console in a windowed build."""
+    stream = sys.stdout
+    if stream is not None:
+        try:
+            stream.write(text)
+            stream.flush()
+            return True
+        except (OSError, ValueError):
+            pass
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        if not (kernel32.AttachConsole(-1) or kernel32.AllocConsole()):
+            return False
+        console = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        console.write(text)
+        sys.stdout = console
+        sys.stderr = console
+        return True
+    except (OSError, AttributeError, ImportError):
+        return False
 
 
 def _headless_smoke(args):
@@ -44,7 +72,17 @@ def _headless_smoke(args):
             result["smoke"]["mutation"] = controller.handle("config", {
                 "expected_revision": controller.config["revision"], "theme": "dark",
             })
-        sys.stdout.write(json.dumps(result, default=str) + "\n")
+        if not _write_console(json.dumps(result, default=str) + "\n"):
+            if sys.platform == "win32":
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    "Headless smoke output requires a console.\n"
+                    "Run fan-control.exe from Command Prompt or PowerShell.",
+                    "Fan Control",
+                    0x30,
+                )
+            raise SystemExit(1)
     finally:
         controller.close()
 

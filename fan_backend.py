@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
 """Hardware backends for fan control.
 
-Two kernel interfaces share one policy layer:
+Linux kernel interfaces:
 
 - ``tuxedo_io``: ioctls on a ``/dev/*_io`` character device supporting both
   Uniwill (raw duty 0-198) and Clevo (raw duty 0-255) hardware interfaces.
 - ``clevo_acpi``: sysfs files under the ``clevo-acpi`` platform device,
   per-fan duty 0-100, with a kernel-side dead-man's-switch.
 
+Windows interfaces:
+
+- ``windows_ec``: direct EC port I/O (ports 0x62/0x66) through an
+  InpOut32/64 or WinRing0 helper DLL.
+- ``windows_wmi``: Uniwill/Tongfang EC RAM access over the ACPI WMI
+  ``AcpiTest_MULong`` method, which also exposes EC temperatures and fan
+  tachometers. Manual duty uses the EC user fan mode with the direct PWM
+  registers on the EC's 0-200 scale.
+
 Backends expose duty as a percentage 0-100. ``tuxedo_io`` translates to its
 native raw domain (0-255 for Clevo, 0-198 for Uniwill) at the edge; ``clevo_acpi``
-is already in percent.
+and the Windows backends work in percent at the API boundary.
 
 The clevo-acpi sysfs interface comes from ``arbitrary-string/clevo-acpi-dkms``
 (GPL-2.0-or-later). Its semantics were read from that driver source and from
-the reference daemon ``arbitrary-string/clevo-control-panel`` (GPL-3.0). No
-code is copied from either project; only the documented attribute names and
-command contract are consumed.
+the reference daemon ``arbitrary-string/clevo-control-panel`` (GPL-3.0). The
+Uniwill EC register map and WMI ``GetSetULong`` protocol were verified against
+the upstream Linux ``uniwill`` driver and ``tuxedo-drivers``. No code is copied
+from those projects; only documented attribute names, register addresses, and
+command contracts are consumed.
 """
 
 import ctypes
@@ -730,14 +741,105 @@ class WindowsEcBackend(FanBackend):
         self._dll = None
 
 
+class _WmiEcTransport:
+    """Uniwill EC RAM access over the ACPI WMI ``AcpiTest_MULong`` method.
+
+    The OEM control center talks to the EC with ``GetSetULong``: the 64-bit
+    argument packs a 16-bit address, 16-bit data, and a 16-bit operation
+    (``0x0100`` read, ``0x0000`` write). The low byte of the reply is the
+    value read; ``0xFEFEFEFE`` signals a failed transaction.
+    """
+
+    WMI_NAMESPACE = "root\\wmi"
+    WMI_CLASS = "AcpiTest_MULong"
+    WMI_METHOD = "GetSetULong"
+    READ_OP = 0x0100
+    COMM_FAILURE = 0xFEFEFEFE
+
+    def __init__(self):
+        try:
+            import clr
+        except ImportError as exc:
+            raise FanBackendError(
+                "pythonnet is required for WMI fan control; install it with "
+                "'pip install -r requirements-windows.txt'"
+            ) from exc
+        try:
+            clr.AddReference("System.Management")
+            import System
+            from System.Management import ManagementObjectSearcher
+        except Exception as exc:  # noqa: BLE001 - surfaced as a backend error
+            raise FanBackendError(f"could not load System.Management for WMI access: {exc}") from exc
+        self._system = System
+        self._object = None
+        try:
+            searcher = ManagementObjectSearcher(
+                self.WMI_NAMESPACE, f"SELECT * FROM {self.WMI_CLASS}"
+            )
+            for candidate in searcher.Get():
+                self._object = candidate
+                break
+        except Exception as exc:  # noqa: BLE001 - surfaced as a backend error
+            raise FanBackendError(f"WMI EC interface unavailable: {exc}") from exc
+        if self._object is None:
+            raise FanBackendError(
+                f"WMI class {self.WMI_CLASS} not found; this is not a supported Uniwill/Tongfang EC"
+            )
+        try:
+            self.read(0x043E)
+        except FanBackendError as exc:
+            raise FanBackendError(
+                f"cannot access the Uniwill EC over WMI ({exc}); run as Administrator"
+            ) from exc
+
+    def _call(self, data):
+        try:
+            params = self._object.GetMethodParameters(self.WMI_METHOD)
+            params["Data"] = self._system.UInt64(data)
+            out = self._object.InvokeMethod(self.WMI_METHOD, params, None)
+            return int(out["Return"])
+        except Exception as exc:  # noqa: BLE001 - surfaced as a backend error
+            raise FanBackendError(f"WMI EC call failed: {exc}") from exc
+
+    def read(self, address):
+        ret = self._call((self.READ_OP << 32) | (address & 0xFFFF))
+        if ret == self.COMM_FAILURE:
+            raise FanBackendError(f"EC read failed at 0x{address:04X}")
+        return ret & 0xFF
+
+    def write(self, address, value):
+        ret = self._call(((value & 0xFF) << 16) | (address & 0xFFFF))
+        if ret == self.COMM_FAILURE:
+            raise FanBackendError(f"EC write failed at 0x{address:04X}")
+
+    def close(self):
+        self._object = None
+
+
 class WindowsWmiBackend(FanBackend):
-    """ACPI WMI fan control backend for Windows (Clevo / Tongfang / Uniwill)."""
+    """Uniwill/Tongfang EC fan control over the ACPI WMI interface.
+
+    Manual control uses the EC user fan mode (``0x0751`` bit 6) together with
+    the direct PWM registers ``0x1804``/``0x1809`` on the EC's 0-200 scale.
+    Reading ``0x0751`` without the bit lets firmware automatic control resume.
+    Requires Administrator access.
+    """
 
     name = "windows_wmi"
 
-    def __init__(self):
-        self._duties = {1: 0, 2: 0}
+    EC_CPU_TEMP = 0x043E
+    EC_GPU_TEMP = 0x044F
+    EC_FAN_RPM = {1: 0x0464, 2: 0x046C}
+    EC_MANUAL_MODE = 0x0751
+    EC_MANUAL_BIT = 0x40
+    EC_PWM_WRITE = {1: 0x1804, 2: 0x1809}
+    PWM_MAX = 200
+
+    def __init__(self, transport=None):
+        self._transport = transport if transport is not None else _WmiEcTransport()
         self._lock = threading.RLock()
+        self._manual = False
+        self._duties = {1: 0, 2: 0}
 
     @classmethod
     def available(cls):
@@ -747,8 +849,10 @@ class WindowsWmiBackend(FanBackend):
         try:
             res = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 "Get-CimClass -Namespace root/wmi -ClassName AcpiTest_Package,CLEVO_GET -ErrorAction SilentlyContinue"],
-                capture_output=True, text=True, timeout=2, check=False,
+                 "Get-CimClass -Namespace root/wmi -ClassName AcpiTest_MULong "
+                 "-ErrorAction SilentlyContinue | Select-Object -First 1 "
+                 "| ForEach-Object { $_.CimClassName }"],
+                capture_output=True, text=True, timeout=5, check=False,
             )
             return res.returncode == 0 and bool(res.stdout.strip())
         except (FileNotFoundError, OSError, subprocess.SubprocessError):
@@ -758,23 +862,68 @@ class WindowsWmiBackend(FanBackend):
         return [1, 2]
 
     def lock(self):
-        pass
+        with self._lock:
+            if not self._manual:
+                value = self._transport.read(self.EC_MANUAL_MODE)
+                if not value & self.EC_MANUAL_BIT:
+                    self._transport.write(self.EC_MANUAL_MODE, value | self.EC_MANUAL_BIT)
+                self._manual = True
 
     def release(self):
-        pass
+        with self._lock:
+            value = self._transport.read(self.EC_MANUAL_MODE)
+            if value & self.EC_MANUAL_BIT:
+                self._transport.write(self.EC_MANUAL_MODE, value & ~self.EC_MANUAL_BIT)
+            self._manual = False
 
     def write_duty(self, fan, percent):
         try:
             pct = float(percent)
         except (TypeError, ValueError):
             raise FanBackendError(f"invalid duty {percent!r}") from None
+        fan_index = int(fan)
+        address = self.EC_PWM_WRITE.get(fan_index)
+        if address is None:
+            raise FanBackendError(f"unsupported fan {fan!r}")
         percent = max(0, min(MAX_DUTY_PERCENT, int(round(pct))))
+        raw = round(percent * self.PWM_MAX / MAX_DUTY_PERCENT)
         with self._lock:
-            self._duties[int(fan)] = percent
+            self.lock()
+            self._transport.write(address, raw)
+            self._duties[fan_index] = percent
 
     def read_duty(self, fan):
+        address = self.EC_PWM_WRITE.get(int(fan))
+        if address is None:
+            return 0
         with self._lock:
-            return int(self._duties.get(int(fan), 0))
+            raw = self._transport.read(address)
+        return int(round(raw * MAX_DUTY_PERCENT / self.PWM_MAX))
+
+    def read_temp(self):
+        with self._lock:
+            value = self._transport.read(self.EC_CPU_TEMP)
+        return float(value) if 0 < value <= 150 else None
+
+    def read_temp2(self):
+        with self._lock:
+            value = self._transport.read(self.EC_GPU_TEMP)
+        return float(value) if 0 < value <= 150 else None
+
+    def read_rpm(self, fan):
+        address = self.EC_FAN_RPM.get(int(fan))
+        if address is None:
+            return None
+        with self._lock:
+            hi = self._transport.read(address)
+            lo = self._transport.read(address + 1)
+        rpm = (hi << 8) | lo
+        return rpm if 0 < rpm < 30000 else None
+
+    def close(self):
+        with self._lock:
+            if self._transport is not None:
+                self._transport.close()
 
 
 def _find_ec_device():

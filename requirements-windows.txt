@@ -5,3 +5,5 @@
 pywebview>=4.0.0
 pystray>=0.19.0
 Pillow>=9.0.0
+# Required for windows_ec/windows_wmi hardware control (Uniwill/Tongfang EC):
+pythonnet>=3.0.0

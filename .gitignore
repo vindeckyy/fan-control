@@ -7,3 +7,5 @@ ui/node_modules/
 *.old/
 dist/
 build/
+.venv/
+venv/

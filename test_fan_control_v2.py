@@ -715,14 +715,25 @@ class HistoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = pathlib.Path(self.tmp.name) / "history.db"
+        self._stores = []
 
     def tearDown(self):
-        self.tmp.cleanup()
+        for s in getattr(self, "_stores", []):
+            try:
+                s.close()
+            except Exception:
+                pass
+        try:
+            self.tmp.cleanup()
+        except Exception:
+            pass
 
     def store(self, **kwargs):
         defaults = {"path": self.path, "retention_days": 7, "persist": True}
         defaults.update(kwargs)
-        return history.HistoryStore(**defaults)
+        s = history.HistoryStore(**defaults)
+        self._stores.append(s)
+        return s
 
     def sample(self, ts, duty=50, temp=65.0):
         return dict(
@@ -1111,7 +1122,7 @@ class EndToEndSimulationTests(unittest.TestCase):
                         name="nvidia", label="GPU 0 · RTX", aliases=("gpu",), source="nvidia-smi"),
         ]
         self.ctl = controller.FanController(
-            self.backend, self.base / "cfg.json", self.base, demo=False,
+            self.backend, self.base / "cfg.json", self.base, demo=False, data_dir=self.tmp.name,
         )
         patcher = mock.patch.object(controller, "scan_sensor_records", return_value=self.sensors)
         patcher.start()
@@ -1524,8 +1535,13 @@ class BugfixRegressionTests(unittest.TestCase):
             server = rpc.RpcServer(ctl, base / "control.sock")
             server.start()
             try:
-                sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-                sock.connect(str(base / "control.sock"))
+                if hasattr(_socket, "AF_UNIX"):
+                    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    sock.connect(str(base / "control.sock"))
+                else:
+                    port = int((base / "control.sock").read_text().strip())
+                    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                    sock.connect(("127.0.0.1", port))
                 sock.settimeout(5)
                 try:
                     sock.sendall(b'{"method": "capabilities", "params": {}}\n'

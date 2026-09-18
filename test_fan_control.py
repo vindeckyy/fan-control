@@ -27,6 +27,18 @@ def load(name, filename):
     return module
 
 
+def connect_raw_socket(path):
+    """Open a raw protocol connection whether the server uses AF_UNIX or TCP."""
+    if hasattr(socket, "AF_UNIX"):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(str(path))
+        return sock
+    port = int(pathlib.Path(path).read_text().strip())
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(("127.0.0.1", port))
+    return sock
+
+
 policy = load("fan_policy", "fan_policy.py")
 runtime = load("fan_runtime", "fan_runtime.py")
 controller = load("fan_controller", "fan_controller.py")
@@ -72,6 +84,7 @@ class FanLogicTests(unittest.TestCase):
         self.assertTrue(any(s["name"] == "k10temp" for s in sensors))
         self.assertTrue(any(s["name"] == "amdgpu" for s in sensors))
 
+    @unittest.skipIf(sys.platform == "win32", "hwmon sysfs scanning is Linux-only")
     def test_scan_sensors_hwmon_and_expanded_chips(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = pathlib.Path(tmp)
@@ -551,6 +564,7 @@ class BackendTests(unittest.TestCase):
         probe.ping()
         self.assertEqual(probe.written, [], "keepalive is rate-limited")
 
+    @unittest.skipIf(sys.platform == "win32", "tuxedo_io backend is Linux-only")
     def test_tuxedo_uniwill_reads_and_writes_without_rpm(self):
         class _Probe(backend.TuxedoIoBackend):
             def __init__(self):
@@ -650,6 +664,7 @@ class BackendTests(unittest.TestCase):
             with self.assertRaises(backend.FanBackendError):
                 backend.ClevoAcpiBackend(base=pathlib.Path(tmp))
 
+    @unittest.skipIf(sys.platform == "win32", "clevo_acpi backend is Linux-only")
     def test_detect_backend_prefers_clevo(self):
         fake = object()
         with mock.patch.object(backend.ClevoAcpiBackend, "available", return_value=True), \
@@ -658,17 +673,20 @@ class BackendTests(unittest.TestCase):
             self.assertIs(backend.detect_backend("auto"), fake)
             tux.assert_not_called()
 
+    @unittest.skipIf(sys.platform == "win32", "tuxedo_io backend is Linux-only")
     def test_detect_backend_explicit_tuxedo(self):
         with mock.patch.object(backend, "TuxedoIoBackend") as tux:
             backend.detect_backend("tuxedo_io", device="/dev/example_io")
             tux.assert_called_once_with("/dev/example_io")
 
+    @unittest.skipIf(sys.platform == "win32", "tuxedo_io backend is Linux-only")
     def test_detect_backend_env_override(self):
         with mock.patch.object(backend, "TuxedoIoBackend") as tux, \
                 mock.patch.dict(os.environ, {"FAN_CONTROL_BACKEND": "tuxedo_io"}):
             backend.detect_backend(None, device="/dev/example_io")
             tux.assert_called_once_with("/dev/example_io")
 
+    @unittest.skipIf(sys.platform == "win32", "clevo_acpi backend is Linux-only")
     def test_detect_backend_arg_beats_env(self):
         fake = object()
         with mock.patch.object(backend.ClevoAcpiBackend, "available", return_value=True), \
@@ -781,7 +799,7 @@ class DaemonTests(unittest.TestCase):
                 policy.load_config(bad_path)
 
     def test_daemon_dry_run_prints_decisions(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             proc = subprocess.Popen(
                 [
                     sys.executable,
@@ -808,6 +826,11 @@ class DaemonTests(unittest.TestCase):
             finally:
                 proc.terminate()
                 proc.wait(timeout=2)
+                for pipe in (proc.stdout, proc.stderr):
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
 
 
 class RpcTests(unittest.TestCase):
@@ -852,8 +875,7 @@ class RpcTests(unittest.TestCase):
         self.assertIn("mode", snap)
 
     def test_oversized_request_rejected(self):
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(str(self.socket_path))
+        sock = connect_raw_socket(self.socket_path)
         try:
             sock.sendall(b"x" * (rpc.MAX_MESSAGE + 1) + b"\n")
             reply = b""
@@ -881,10 +903,15 @@ class RpcTests(unittest.TestCase):
             self.assertIn("config", text)
             self.assertIn("no file", text)
             cfg.write_text("{}")
-            # Cover line 55 (no hardware found branch)
-            with mock.patch("pathlib.Path.glob", return_value=[]):
-                text = fan_diagnostics.diagnose(str(cfg))
-                self.assertIn("no fan-control hardware found", text)
+            if sys.platform == "win32":
+                with mock.patch.object(backend.WindowsWmiBackend, "available", return_value=False):
+                    text = fan_diagnostics.diagnose(str(cfg))
+                    self.assertIn("no Windows fan-control EC driver found", text)
+            else:
+                # Cover line 55 (no hardware found branch)
+                with mock.patch("pathlib.Path.glob", return_value=[]):
+                    text = fan_diagnostics.diagnose(str(cfg))
+                    self.assertIn("no fan-control hardware found", text)
 
     def test_diagnose_exception_resilience(self):
         import fan_diagnostics
@@ -997,6 +1024,8 @@ class RpcEdgeTests(unittest.TestCase):
     def test_give_group_access_resilience(self):
         # Should not throw even with non-existent groups or paths
         rpc._give_group_access("/tmp/nonexistent-file-path-xyz")
+        if sys.platform == "win32":
+            return
         with mock.patch("grp.getgrnam", side_effect=KeyError("no group")):
             rpc._give_group_access("/tmp")
 
@@ -1010,7 +1039,8 @@ class RpcEdgeTests(unittest.TestCase):
             perm_client = rpc.RpcClient(self.sock_path)
             with self.assertRaises(PermissionError) as ctx:
                 perm_client.connect()
-            self.assertIn("fan-control group", str(ctx.exception))
+            expected = "run as Administrator" if sys.platform == "win32" else "fan-control group"
+            self.assertIn(expected, str(ctx.exception))
 
     def test_client_context_manager(self):
         with rpc.RpcClient(self.sock_path) as c:
@@ -1026,8 +1056,7 @@ class RpcEdgeTests(unittest.TestCase):
         server2.close()
 
     def test_invalid_json_protocol_errors(self):
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(str(self.sock_path))
+        s = connect_raw_socket(self.sock_path)
         try:
             # Send malformed json
             s.sendall(b"not valid json\n")
@@ -1156,7 +1185,7 @@ class DaemonInProcessTests(unittest.TestCase):
             )
             # Run 1 tick then stop
             def fake_sleep(_dur):
-                os.kill(os.getpid(), signal.SIGTERM)
+                signal.raise_signal(signal.SIGTERM)
             with mock.patch("time.sleep", side_effect=fake_sleep):
                 daemon.run(args)
 
@@ -1175,8 +1204,9 @@ class DaemonInProcessTests(unittest.TestCase):
             )
             def fake_sleep(_dur):
                 # trigger reload and then stop
-                os.kill(os.getpid(), signal.SIGHUP)
-                os.kill(os.getpid(), signal.SIGTERM)
+                if hasattr(signal, "SIGHUP"):
+                    signal.raise_signal(signal.SIGHUP)
+                signal.raise_signal(signal.SIGTERM)
             mock_lock = mock.MagicMock()
             mock_lock.acquire.return_value = True
             with mock.patch.object(daemon, "detect_backend", return_value=backend.DemoBackend()), \
@@ -1395,7 +1425,7 @@ class DeepCoverageTests(unittest.TestCase):
 
     def test_daemon_main_dry_run_entrypoint(self):
         def stop_immediately(_dur):
-            os.kill(os.getpid(), signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("sys.argv", ["fan-daemon", "--dry-run", "--interval", "0.01", "--runtime-dir", tmp]), \
                  mock.patch("time.sleep", side_effect=stop_immediately):
@@ -1614,14 +1644,15 @@ class PerFile95GateTests(unittest.TestCase):
                 runtime_dir=str(rdir), backend="auto", device=None, fans=2,
             )
             def fake_sleep(_dur):
-                handler = signal.getsignal(signal.SIGHUP)
-                if callable(handler):
-                    # 1. Success reload (covers line 92)
-                    handler(signal.SIGHUP, None)
-                    # 2. Failure reload (covers lines 93-94)
-                    mock_ctrl.reload_config.side_effect = ValueError("reload err")
-                    handler(signal.SIGHUP, None)
-                os.kill(os.getpid(), signal.SIGTERM)
+                if hasattr(signal, "SIGHUP"):
+                    handler = signal.getsignal(signal.SIGHUP)
+                    if callable(handler):
+                        # 1. Success reload (covers line 92)
+                        handler(signal.SIGHUP, None)
+                        # 2. Failure reload (covers lines 93-94)
+                        mock_ctrl.reload_config.side_effect = ValueError("reload err")
+                        handler(signal.SIGHUP, None)
+                signal.raise_signal(signal.SIGTERM)
 
             mock_lock = mock.MagicMock()
             mock_lock.acquire.return_value = True
@@ -1714,9 +1745,10 @@ class PerFile95GateTests(unittest.TestCase):
 
     def test_rpc_error_and_close_branches(self):
         # chown raises OSError
-        with mock.patch("grp.getgrnam", return_value=mock.MagicMock(gr_gid=1000)), \
-             mock.patch("os.chown", side_effect=PermissionError("no chown")):
-            rpc._give_group_access("/tmp")
+        if sys.platform != "win32":
+            with mock.patch("grp.getgrnam", return_value=mock.MagicMock(gr_gid=1000)), \
+                 mock.patch("os.chown", side_effect=PermissionError("no chown")):
+                rpc._give_group_access("/tmp")
 
         # bind raises OSError in setup
         with mock.patch("socket.socket.bind", side_effect=OSError("bind fail")):
