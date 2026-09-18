@@ -113,7 +113,7 @@ Fan Control treats thermal control as a safety-critical path:
 Published packages are available from [GitHub Releases](https://github.com/vindeckyy/fan-control/releases/latest). This working tree contains the unreleased v2 implementation. For a locally built v2 Debian package:
 
 ```bash
-sudo dpkg -i fan-control_2.0.0-1_amd64.deb
+sudo dpkg -i fan-control_2.0.1-1_amd64.deb
 sudo usermod -aG fan-control $USER
 sudo systemctl enable --now fan-daemon
 ```
@@ -471,7 +471,7 @@ fan-ctl diagnostics --json
 ```
 
 History defaults to `/var/lib/fan-control/history.db` on Linux (or `%PROGRAMDATA%\fan-control\data\history.db` on Windows) with seven-day retention.
-Command execution through automation is not included. Package version 2.0.0
+Command execution through automation is not included. Package version 2.0.1
 uses epoch 1 so it sorts after the previous calendar-version packages.
 
 ### v2 verification

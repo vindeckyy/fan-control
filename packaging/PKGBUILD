@@ -1,6 +1,6 @@
 # Maintainer: Fan Control Community <fan-control@community.org>
 pkgname=fan-control
-pkgver=2.0.0
+pkgver=2.0.1
 epoch=1
 pkgrel=1
 pkgdesc="Safety-focused Linux fan-control daemon and native WebKitGTK workstation for Clevo/Tongfang systems"

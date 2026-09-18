@@ -23,7 +23,7 @@ Broad cross-model hardware acceptance and release publication remain pending.
 | Interaction acceptance | Fan rename/test; curve create/edit/duplicate; rule test/save; preferences and safety; keyboard palette/Escape; modes; sensor selection/pinning; history ranges; schedule edits; diagnostics filter |
 | Installation staging | New Python modules, built UI, service prefix, tmpfiles, and sysusers entries are included |
 | Debian binary build | `dpkg-buildpackage -d -us -uc -b` succeeds in an isolated source copy with locally unpacked dh-python |
-| Version ordering | App and package versions synchronize at 2.0.0; package epoch 1 preserves upgrades from 2026.9.1 |
+| Version ordering | App and package versions synchronize at 2.0.1; package epoch 1 preserves upgrades from 2026.9.1 |
 
 ## Windows results (2026-09-18)
 

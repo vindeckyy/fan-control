@@ -989,7 +989,7 @@ def save_document(path, doc, *, original_version=None):
                 pass
 
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 
 GPU_NAME_HINTS_EXTENDED = GPU_NAME_HINTS
 

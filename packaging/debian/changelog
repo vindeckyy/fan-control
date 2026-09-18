@@ -1,3 +1,11 @@
+fan-control (1:2.0.1-1) unstable; urgency=medium
+
+  * Windows: real Uniwill/Tongfang WMI fan control, tachometers, and
+    scheduled-task service setup.
+  * Cross-platform test suite and documentation updates.
+
+ -- Fan Control Community <fan-control@community.org>  Fri, 18 Sep 2026 12:00:00 -0400
+
 fan-control (1:2.0.0-1) unstable; urgency=medium
 
   * Versioned configuration, per-fan policies, automation and persistent history.
