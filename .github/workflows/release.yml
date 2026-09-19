@@ -81,12 +81,23 @@ jobs:
           chmod +x dist/*.AppImage
           export APPIMAGE_EXTRACT_AND_RUN=1
           export WEBKIT_DISABLE_DMABUF_RENDERER=1
-          timeout 30 xvfb-run -a ./dist/*.AppImage --demo > smoke.log 2>&1 || true
+          # GitHub runners cannot create the WebKit bubblewrap sandbox; disable
+          # it for the CI smoke only (the shipped AppRun keeps the sandbox on).
+          export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+          set +e
+          timeout 30 xvfb-run -a ./dist/*.AppImage --demo > smoke.log 2>&1
+          rc=$?
+          set -e
           sed -n '1,40p' smoke.log
-          if grep -qiE 'Traceback|ModuleNotFoundError|Namespace .* not available|cannot open display|WebKit.*not available' smoke.log; then
+          if [ "$rc" -ne 124 ]; then
+            echo "AppImage exited before the timeout (rc=$rc)"
+            exit 1
+          fi
+          if grep -qiE 'Traceback|ModuleNotFoundError|Namespace .* not available|cannot open display|failed to receive credentials' smoke.log; then
             echo 'AppImage smoke test failed'
             exit 1
           fi
+          echo 'AppImage stayed running for 30s under Xvfb'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
