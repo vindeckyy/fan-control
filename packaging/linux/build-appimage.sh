@@ -96,6 +96,7 @@ log "Bundling Python ${PYVER} (${PYBIN})"
 install -Dm755 "${PYBIN}" "${APPDIR}/usr/bin/python${PYVER}"
 ln -sf "python${PYVER}" "${APPDIR}/usr/bin/python3"
 
+mkdir -p "${APPDIR}/usr/lib"
 cp -a "/usr/lib/python${PYVER}" "${APPDIR}/usr/lib/python${PYVER}"
 ( cd "${APPDIR}/usr/lib/python${PYVER}" && rm -rf \
     test tests idlelib tkinter turtledemo ensurepip lib2to3 \
