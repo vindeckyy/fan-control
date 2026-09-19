@@ -92,6 +92,7 @@ jobs:
       - name: Upload assets to release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           mkdir -p out
           cp artifacts/windows-exe/*.exe out/
