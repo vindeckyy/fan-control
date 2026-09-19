@@ -86,6 +86,7 @@ mkdir -p "${APPDIR}/usr/share/fan-control" "${APPDIR}/usr/bin"
 log "Staging application files"
 install -m 644 "${ROOT}"/fan_*.py "${APPDIR}/usr/share/fan-control/"
 install -m 755 "${ROOT}/fan-gui.py" "${ROOT}/fan-daemon.py" "${ROOT}/fan-ctl.py" "${APPDIR}/usr/share/fan-control/"
+mkdir -p "${APPDIR}/usr/share/fan-control/ui"
 cp -a "${ROOT}/ui/dist" "${APPDIR}/usr/share/fan-control/ui/dist"
 
 # ---------- Bundle CPython, stdlib, and PyGObject ----------
