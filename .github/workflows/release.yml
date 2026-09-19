@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish assets to (for example v2.0.1)
+        required: true
+        default: v2.0.1
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  windows-exe:
+    name: Windows one-file executables
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r requirements-windows.txt
+      - name: Build one-file executables
+        run: pyinstaller --clean -y packaging\windows\fan-control-onefile.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: |
+            dist/fan-control.exe
+            dist/fan-ctl.exe
+            dist/fan-daemon.exe
+          if-no-files-found: error
+
+  linux-appimage:
+    name: Linux AppImage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+      - name: Install GTK/WebKit build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-gi pkg-config libgtk-4-dev \
+            gir1.2-gtk-4.0 gir1.2-webkit-6.0 \
+            libglib2.0-bin libgtk-3-bin librsvg2-common \
+            desktop-file-utils file wget
+      - name: Build AppImage
+        run: bash packaging/linux/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [windows-exe, linux-appimage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p out
+          cp artifacts/windows-exe/*.exe out/
+          cp artifacts/linux-appimage/*.AppImage out/
+          cd out
+          sha256sum * > SHA256SUMS.txt
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --title "Fan Control $RELEASE_TAG" --generate-notes
+          gh release upload "$RELEASE_TAG" * --clobber
