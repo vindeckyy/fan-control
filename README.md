@@ -118,6 +118,30 @@ sudo usermod -aG fan-control $USER
 sudo systemctl enable --now fan-daemon
 ```
 
+### Prebuilt release binaries
+
+Each [release](https://github.com/vindeckyy/fan-control/releases/latest) ships:
+
+- **Windows**: `fan-control.exe` (dashboard), `fan-ctl.exe` (CLI), and
+  `fan-daemon.exe` (background daemon) as self-contained one-file executables.
+  No Python installation is required. Run `fan-daemon.exe` from an
+  Administrator prompt for hardware control, or install it as a startup task
+  with `scripts\install-service-windows.ps1`.
+- **Linux**: `fan-control-<version>-x86_64.AppImage` bundles the full
+  GTK4 + WebKitGTK 6 dashboard (CPython, PyGObject, GTK, WebKit and the built
+  UI). The dashboard is unprivileged; start the root daemon with the `daemon`
+  mode:
+
+  ```bash
+  chmod +x fan-control-2.0.1-x86_64.AppImage
+  ./fan-control-2.0.1-x86_64.AppImage
+  sudo ./fan-control-2.0.1-x86_64.AppImage daemon
+  ./fan-control-2.0.1-x86_64.AppImage ctl status --json
+  ```
+
+- `SHA256SUMS.txt` lists the checksum of every attached asset; GitHub also
+  provides source archives for the tag.
+
 ### From source
 
 Debian/Kali:
