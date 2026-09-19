@@ -75,6 +75,18 @@ jobs:
             desktop-file-utils file wget
       - name: Build AppImage
         run: bash packaging/linux/build-appimage.sh
+      - name: Smoke-test the AppImage
+        run: |
+          sudo apt-get install -y xvfb
+          chmod +x dist/*.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export WEBKIT_DISABLE_DMABUF_RENDERER=1
+          timeout 30 xvfb-run -a ./dist/*.AppImage --demo > smoke.log 2>&1 || true
+          sed -n '1,40p' smoke.log
+          if grep -qiE 'Traceback|ModuleNotFoundError|Namespace .* not available|cannot open display|WebKit.*not available' smoke.log; then
+            echo 'AppImage smoke test failed'
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
